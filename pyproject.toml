@@ -4,7 +4,7 @@
 [project]
 name = "comfyui-renest"
 description = "Nest a working run - rebuild it anywhere, byte for byte. Official Renest panel."
-version = "0.1.0"
+version = "0.1.1"
 license = { file = "LICENSE" }
 dependencies = []
 
