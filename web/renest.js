@@ -246,8 +246,13 @@ function drawPreview(out, preview, workflow) {
   total.appendChild(el("span", "font-family:monospace", fmtBytes(preview.size_estimate_bytes)));
   box.appendChild(total);
   if (preview.out_dir) {
-    const where = el("div", "font-size:11px;opacity:.6;margin-top:6px;word-break:break-all",
-      `Saved on this machine to ${preview.out_dir}`);
+    // Label and path on separate lines. Kept as one line with break-all, the path
+    // split mid-word at whatever column the panel happened to end at
+    // ("…/renest-ne" + "ts"), which reads like a typo. ``anywhere`` moves the whole
+    // path down first and only breaks it if it still does not fit.
+    const where = el("div", "font-size:11px;opacity:.6;margin-top:6px", "Saved on this machine to");
+    where.appendChild(el("div", "font-family:monospace;overflow-wrap:anywhere;opacity:.9",
+      preview.out_dir));
     box.appendChild(where);
   }
   out.appendChild(box);
@@ -260,7 +265,13 @@ function drawPreview(out, preview, workflow) {
     warn.appendChild(el("div", "font-weight:600;margin-bottom:4px",
       `Worth reading before you save (${warnings.length})`));
     for (const w of warnings.slice(0, 6)) {
-      warn.appendChild(el("div", "font-size:11px;opacity:.8;padding:2px 0", `· ${w}`));
+      // Bullet in its own column, text in a shrinkable one. As one text node the
+      // long file paths could not wrap: they ran past the right edge of the box and
+      // pushed the bullet onto a line of its own.
+      const row = el("div", "display:flex;gap:6px;font-size:11px;opacity:.8;padding:2px 0");
+      row.appendChild(el("span", "flex:none", "·"));
+      row.appendChild(el("span", "min-width:0;overflow-wrap:anywhere", w));
+      warn.appendChild(row);
     }
     if (warnings.length > 6) {
       warn.appendChild(el("div", "font-size:11px;opacity:.5", `… and ${warnings.length - 6} more`));
