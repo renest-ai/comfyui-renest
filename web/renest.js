@@ -293,6 +293,21 @@ function drawPreview(out, preview, workflow) {
   };
 }
 
+// Turn the engine's NDJSON log tail into plain sentences. Anything we don't
+// recognise is dropped rather than dumped: a user watching a 20 GB copy should
+// see what is happening, not our wire format.
+function humanLog(lines) {
+  const out = [];
+  for (const raw of lines.slice(-20)) {
+    let e;
+    try { e = JSON.parse(raw); } catch { continue; }
+    if (e.type === "stage_start" && e.desc) out.push(e.desc);
+    else if (e.type === "warning" && (e.human || e.message)) out.push(e.human || e.message);
+    else if (e.type === "stage_end" && e.desc) out.push(`${e.desc} — done`);
+  }
+  return out.slice(-4).join("\n");
+}
+
 function followJob(out, jobId) {
   out.replaceChildren();
   const head = el("div", "font-weight:600", "Packing…");
@@ -317,13 +332,17 @@ function followJob(out, jobId) {
     stageLine.textContent = `${job.state}${job.stage ? ` · stage ${job.stage}` : ""}` +
       (p.speed_mbps ? ` · ${p.speed_mbps.toFixed(0)} Mbps` : "");
     if (p.percent != null) fill.style.width = `${Math.round(p.percent)}%`;
-    if (Array.isArray(job.logs_tail)) log.textContent = job.logs_tail.slice(-12).join("\n");
+    // The engine's log is machine-readable NDJSON. Printing it raw put lines like
+    // {"type":"progress","bytes_total":797842085288} on screen (seen on a real run,
+    // 2026-08-15) — so keep the last few and show only the sentence inside each.
+    if (Array.isArray(job.logs_tail)) log.textContent = humanLog(job.logs_tail);
     if (["succeeded", "failed", "cancelled", "interrupted"].includes(job.state)) {
       clearInterval(pollTimer);
       cancel.remove();
       if (job.state === "succeeded") {
         fill.style.width = "100%";
         head.textContent = "✓ Nested & verified";
+        log.remove();  // it's done — the trace of how it got there is just noise now
         // Always show where it landed — people need to find it, back it up, hand it on.
         const where = (job.result || {}).manifest_path;
         stageLine.textContent = "This run can now be rebuilt byte-for-byte on any machine you rent.";
