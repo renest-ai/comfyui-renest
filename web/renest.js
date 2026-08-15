@@ -55,7 +55,7 @@ async function serveAlive() {
 
 async function serveFetch(path, opts = {}) {
   const t = await fetchToken();
-  if (!t) throw new Error("no serve token — run `renest serve` once on this machine");
+  if (!t) throw new Error("No access token yet — run `renest serve` once on this machine");
   const r = await fetch(`${SERVE}${path}`, {
     ...opts,
     headers: {
@@ -165,7 +165,10 @@ async function drawInto(root) {
     c2.appendChild(copyBtn(SERVE_CMD));
     guide.appendChild(c2);
     guide.appendChild(el("p", S.sub + ";margin-top:8px",
-      "renest is a general rebuild tool — one command saves the models, custom nodes, " +
+      // Sentence-initial: the brand form, capitalised. The bare command name at the
+      // start of a sentence reads as a typo to everyone who does not already know
+      // that the command is spelled in lower case.
+      "Renest is a general rebuild tool — one command saves the models, custom nodes, " +
       "dependency locks and workflow behind a working run, verified byte by byte."));
     root.appendChild(guide);
     const retry = el("button", S.sec, "Check again");
