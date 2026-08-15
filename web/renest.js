@@ -110,11 +110,42 @@ function copyBtn(cmd) {
     "margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border:1px solid #555;" +
     "border-radius:4px;background:transparent;color:inherit", "Copy");
   b.onclick = async () => {
-    try { await navigator.clipboard.writeText(cmd); b.textContent = "✓"; }
-    catch { b.textContent = "✗"; }
-    setTimeout(() => { b.textContent = "Copy"; }, 1200);
+    const ok = await copyText(cmd);
+    b.textContent = ok ? "✓" : "Select it, then press Ctrl/⌘-C";
+    setTimeout(() => { b.textContent = "Copy"; }, ok ? 1200 : 4000);
   };
   return b;
+}
+
+/** Copy without assuming the clipboard API is there.
+ *
+ * ComfyUI on a rented pod is opened over plain http at an IP address, and a
+ * browser gives ``navigator.clipboard`` only to secure origins — measured on a
+ * LAN box: ``http://<ip>:8188`` reports isSecureContext false and no clipboard
+ * object at all, while ``http://127.0.0.1:8188`` has both. That is our most
+ * common setup, so the button used to fail for exactly the people it is for.
+ * The old textarea trick still works there.
+ */
+async function copyText(text) {
+  try {
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to the old way */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:-1000px;left:0;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 function toast(severity, summary, detail) {
