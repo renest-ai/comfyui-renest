@@ -342,7 +342,6 @@ function followJob(out, jobId) {
       if (job.state === "succeeded") {
         fill.style.width = "100%";
         head.textContent = "✓ Nested & verified";
-        log.remove();  // it's done — the trace of how it got there is just noise now
         // Always show where it landed — people need to find it, back it up, hand it on.
         const where = (job.result || {}).manifest_path;
         stageLine.textContent = "This run can now be rebuilt byte-for-byte on any machine you rent.";
@@ -351,6 +350,10 @@ function followJob(out, jobId) {
             where.replace(/\/manifest\.json$/, ""));
           out.insertBefore(p, log);
         }
+        // Drop the running trace only after the path is in — it is inserted relative
+        // to this element, so removing it first threw and took the path (and the
+        // toast) down with it. Caught by looking at the screenshot, not by a test.
+        log.remove();
         toast("success", "Nested", "Saved and verified — rebuild it anywhere.");
       } else {
         head.textContent = job.state === "failed" ? "✗ Packing failed" : `Stopped (${job.state})`;
