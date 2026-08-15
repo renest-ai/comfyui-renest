@@ -1,0 +1,7 @@
+# Kept out of what gets published to the ComfyUI Registry (.gitignore syntax).
+.git/
+.github/
+__pycache__/
+*.pyc
+.DS_Store
+docs/
