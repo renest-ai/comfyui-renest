@@ -1,0 +1,39 @@
+# Publish to the ComfyUI Registry whenever the version in pyproject.toml changes.
+# Set REGISTRY_ACCESS_TOKEN in the repository secrets (Settings → Secrets and
+# variables → Actions) to the API key created at registry.comfy.org.
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths: [pyproject.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail early and say why. Without this, an unset secret reaches the CLI as an
+      # empty --token value and the run dies with "Option '--token' requires an
+      # argument." (exit 2) — which reads like a broken workflow, not a missing
+      # secret. The first publish attempt (2026-08-09) died exactly there.
+      - name: Check the Registry key is configured
+        env:
+          REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$REGISTRY_ACCESS_TOKEN" ]; then
+            echo "::error::REGISTRY_ACCESS_TOKEN is not set. Sign in at https://registry.comfy.org with GitHub, create a publisher whose ID is exactly 'renest' (it must match PublisherId in pyproject.toml), generate an API key, then add it here under Settings -> Secrets and variables -> Actions -> New repository secret, named REGISTRY_ACCESS_TOKEN. Then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Publish to the ComfyUI Registry
+        # Pinned to the ref the Registry documentation itself gives (@main);
+        # the action has no tagged release to pin to instead.
+        uses: Comfy-Org/publish-node-action@main
+        with:
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
