@@ -28,8 +28,11 @@ The Python half does exactly two things:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 WEB_DIRECTORY = "./web"
@@ -100,6 +103,263 @@ def _env_facts() -> dict:
     return facts
 
 
+RUN_RECORD_REL = ".renest/native-libs.json"
+
+
+def _mapped_library_paths() -> list[str]:
+    """Absolute paths of the shared libraries this very process has loaded.
+
+    **Only code inside ComfyUI's process can read this**, which is the whole reason
+    this lives here: by the time packing runs, hours later, the process is usually
+    gone and the engine can only fall back to reading what installed packages
+    *declare* -- measured 2026-08-20 on one real environment, that fallback names
+    29 libraries where the running process shows 97.
+
+    We record raw paths and nothing else. Deciding which of them belong to the
+    machine rather than the environment, and what name the program asks for each
+    by, stays in the engine: one set of rules, in one place. This file must never
+    import the engine -- the process boundary is the licence boundary.
+    """
+    seen: dict[str, None] = {}
+    try:
+        maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    for line in maps.splitlines():
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        path = parts[5].strip()
+        if path.startswith("/") and ".so" in path:
+            seen.setdefault(path, None)
+    return sorted(seen)
+
+
+def _owner_of(node_cls: object) -> dict | None:
+    """Which installed node pack this node class came from, in ComfyUI's own terms.
+
+    ``python_module`` is what ComfyUI itself reports for a node (``custom_nodes.X``
+    for an installed pack, ``nodes`` for a built-in); ``cnr_id`` and ``aux_id`` are
+    the registry identifiers newer versions attach. Read with ``getattr``, so a
+    version that does not set one simply leaves that key out.
+
+    ``dir`` is the folder the class was actually loaded from, taken from the module
+    file rather than from the name -- that is the one the packer needs, and it is
+    right on every version, including the ones that set no attributes at all.
+    """
+    out: dict = {}
+    module = getattr(node_cls, "RELATIVE_PYTHON_MODULE", None)
+    if isinstance(module, str) and module:
+        out["python_module"] = module
+    for attr in ("cnr_id", "aux_id"):
+        value = getattr(node_cls, attr, None)
+        if isinstance(value, str) and value:
+            out[attr] = value
+    src = getattr(sys.modules.get(getattr(node_cls, "__module__", "") or ""), "__file__", None)
+    saw_file = isinstance(src, str) and bool(src)
+    if saw_file:
+        # Not resolved: this runs once per node class every time a prompt finishes,
+        # and resolving asks the filesystem each time inside somebody's run. We want
+        # the folder as it sits in the tree being packed anyway, not through symlinks.
+        parts = Path(src).parts
+        if "custom_nodes" in parts:
+            after = parts[parts.index("custom_nodes") + 1:]
+            if after:
+                out["dir"] = after[0]
+    # "Built-in" is only ever claimed on evidence: ComfyUI said so, or we read the
+    # file and it is outside custom_nodes. A class assembled at run time has no file
+    # at all, and calling that one built-in would tell the packer to leave out a pack
+    # that really is installed -- the one wrong answer that costs a rebuild.
+    if "dir" not in out and (
+        out.get("python_module") == "nodes"
+        or (saw_file and "python_module" not in out)
+    ):
+        out["builtin"] = True
+    return out or None
+
+
+def _node_owners() -> dict:
+    """Every node type this ComfyUI has loaded, mapped to where it came from.
+
+    **Only this process can answer it.** Packing runs later and has to guess from
+    the outside, by searching every custom_nodes folder for the class name as text
+    -- which misses a pack that assembles its node names at start-up, and picks the
+    wrong one when two packs use the same name.
+    """
+    try:
+        import nodes
+
+        mappings = nodes.NODE_CLASS_MAPPINGS
+    except Exception:
+        return {}
+    out: dict = {}
+    for name, node_cls in list(mappings.items()):
+        if not isinstance(name, str):
+            continue
+        owner = _owner_of(node_cls)
+        if owner:
+            out[name] = owner
+    return out
+
+
+#: Shortest gap between two video-memory readings. Short enough to catch a model
+#: being loaded, long enough that asking costs nothing next to the run itself.
+SAMPLE_MIN_GAP_S = 2.0
+
+#: What one run's readings add up to. Reset when a prompt starts, read when it ends.
+#: ``running`` keeps idle time out of it: the figure is what *a run* was seen using,
+#: and an app sitting there with a model still loaded would inflate it for free.
+_vram = {"max_used_bytes": 0, "samples": 0, "last_at": 0.0, "max_gap_s": 0.0,
+         "running": False}
+
+
+def _video_memory_in_use() -> int | None:
+    """Bytes of video memory in use on the card this run is using, right now.
+
+    **The current device only.** Asking about a second card would create a context
+    on it, which costs that card memory the run never wanted to spend.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        free, total = torch.cuda.mem_get_info()
+        used = int(total) - int(free)
+        return used if used > 0 else None
+    except Exception:
+        return None
+
+
+def _reset_video_memory_tally(running: bool = False) -> None:
+    _vram.update({"max_used_bytes": 0, "samples": 0, "last_at": 0.0, "max_gap_s": 0.0,
+                  "running": running})
+
+
+def _sample_video_memory(force: bool = False) -> None:
+    """Take one reading, unless nothing is running or the last one was too recent.
+
+    Readings are taken on the messages the app already sends while a prompt runs, so
+    nothing extra is running in the background and nothing can outlive the run.
+    """
+    if not _vram["running"]:
+        return
+    now = time.monotonic()
+    last = _vram["last_at"]
+    if last and not force and now - last < SAMPLE_MIN_GAP_S:
+        return
+    used = _video_memory_in_use()
+    if used is None:
+        return
+    if last:
+        _vram["max_gap_s"] = max(_vram["max_gap_s"], now - last)
+    _vram["last_at"] = now
+    _vram["samples"] += 1
+    _vram["max_used_bytes"] = max(_vram["max_used_bytes"], used)
+
+
+def _video_memory_block() -> dict | None:
+    """What the readings amount to, in the shape a nest keeps them.
+
+    **The figure never travels without how it was taken.** Checks this far apart can
+    miss a short burst, so the gap is reported as the largest one between readings --
+    a floor that is too low by design, and one that may only ever warn.
+    """
+    if _vram["samples"] < 1 or _vram["max_used_bytes"] <= 0:
+        return None
+    gap = _vram["max_gap_s"] if _vram["samples"] >= 2 else SAMPLE_MIN_GAP_S
+    return {
+        "max_used_bytes": int(_vram["max_used_bytes"]),
+        "sample_interval_s": max(round(float(gap or SAMPLE_MIN_GAP_S), 2), 0.01),
+        "samples": int(_vram["samples"]),
+    }
+
+
+def _write_run_record(video_memory: dict | None = None) -> None:
+    """Put the record beside ComfyUI, so packing can read it after the app is closed.
+
+    **One file, nothing else touched.** Written whole to a temporary name and moved
+    into place, so a reader never sees half of it. Any failure is swallowed: this is
+    a convenience for a later pack, never a reason to disturb somebody's run.
+
+    ``video_memory`` is passed in rather than read here, because only the caller knows
+    how the run ended -- and a figure from a run that did not finish is worse than none.
+    """
+    facts = _env_facts()
+    root = facts.get("comfyui_dir") or facts.get("base_path")
+    paths = _mapped_library_paths()
+    owners = _node_owners()
+    if not root or not (paths or video_memory or owners):
+        return
+    dest = Path(root) / RUN_RECORD_REL
+    payload = {
+        # 2 adds node_owners. Purely additive -- every reader must go on treating
+        # each part as optional, because a record written by an older install has
+        # none of it and is still perfectly good for the parts it does carry.
+        "record_version": 2,
+        "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "python": sys.executable,
+        "mapped_library_paths": paths,
+    }
+    if owners:
+        payload["node_owners"] = owners
+    if video_memory:
+        payload["video_memory"] = video_memory
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".json.part")
+        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+        tmp.replace(dest)
+    except OSError:
+        pass
+
+
+_START_EVENTS = ("execution_start",)
+_SUCCESS_EVENT = "execution_success"
+_DONE_EVENTS = (_SUCCESS_EVENT, "execution_error", "execution_interrupted")
+
+
+def _watch_for_finished_runs() -> None:
+    """Write the record when a prompt finishes, reading video memory along the way.
+
+    Hooked by wrapping the server's own outgoing-message call rather than any
+    execution internal: that one call is what every ComfyUI version uses to tell
+    the browser how a prompt is going, and wrapping it cannot change what is sent.
+    Video memory has to be read *during* the run, which is why every message is a
+    chance to take one -- but **only a run that finished may carry that figure**: a
+    workflow that stops on its first node has a peak of a few hundred megabytes, and
+    letting that overwrite a real run's figure hands the next machine check a floor
+    far below what the run needs. Libraries are kept either way (a run that reached
+    an error still loaded them); the figure is dropped, and no figure honestly reads
+    as "nobody measured".
+
+    The call is passed through exactly as received, arguments untouched: a wrapper
+    with a narrower signature would raise **before** the guard below could catch it,
+    and that exception would land in the caller's run.
+    """
+    from server import PromptServer
+
+    server = PromptServer.instance
+    original = server.send_sync
+
+    def send_sync(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        try:
+            event = args[0] if args else kwargs.get("event")
+            if event in _START_EVENTS:
+                _reset_video_memory_tally(running=True)
+            _sample_video_memory(force=event in _DONE_EVENTS)
+            if event in _DONE_EVENTS:
+                _write_run_record(
+                    _video_memory_block() if event == _SUCCESS_EVENT else None
+                )
+                _vram["running"] = False
+        except Exception:  # never let a bookkeeping slip break somebody's run
+            pass
+        return original(*args, **kwargs)
+
+    server.send_sync = send_sync
+
+
 def _register_routes() -> None:
     from aiohttp import web
     from server import PromptServer
@@ -136,3 +396,8 @@ try:
     _register_routes()
 except Exception as e:  # never let this extension break ComfyUI's startup
     print(f"[comfyui-renest] route registration failed: {e}")
+
+try:
+    _watch_for_finished_runs()
+except Exception as e:  # same rule: a missing record is not worth a broken start
+    print(f"[comfyui-renest] run record hook not installed: {e}")
