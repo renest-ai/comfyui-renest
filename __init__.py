@@ -106,14 +106,12 @@ def _env_facts() -> dict:
 RUN_RECORD_REL = ".renest/native-libs.json"
 
 
-#: **This file no longer reads memory.** It used to open ``/proc/self/maps`` and write
-#: out every shared library the process had loaded. The engine finds the running
-#: application by itself and reads the same thing from outside -- measured 2026-09-02
-#: on a real environment: the published engine, unchanged, still returns 89 libraries
-#: with this file recording none of them. **What is lost** is stated rather than hidden:
-#: once the application is closed the engine has nothing to read and falls back to what
-#: installed packages declare (89 becomes 11); packing says so and tells the user to
-#: start it and pack again.
+#: The library list comes from the engine, which finds the running application and
+#: reads it from outside -- measured 2026-09-02 on a real environment: the published
+#: engine, unchanged, returns 89 libraries with this file recording none of them.
+#: **What is lost** is stated rather than hidden: once the application is closed the
+#: engine has nothing to read and falls back to what installed packages declare
+#: (89 becomes 11); packing says so and tells the user to start it and pack again.
 
 
 def _owner_of(node_cls: object) -> dict | None:
