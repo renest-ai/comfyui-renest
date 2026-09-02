@@ -106,33 +106,14 @@ def _env_facts() -> dict:
 RUN_RECORD_REL = ".renest/native-libs.json"
 
 
-def _mapped_library_paths() -> list[str]:
-    """Absolute paths of the shared libraries this very process has loaded.
-
-    **Only code inside ComfyUI's process can read this**, which is the whole reason
-    this lives here: by the time packing runs, hours later, the process is usually
-    gone and the engine can only fall back to reading what installed packages
-    *declare* -- measured 2026-08-20 on one real environment, that fallback names
-    29 libraries where the running process shows 97.
-
-    We record raw paths and nothing else. Deciding which of them belong to the
-    machine rather than the environment, and what name the program asks for each
-    by, stays in the engine: one set of rules, in one place. This file must never
-    import the engine -- the process boundary is the licence boundary.
-    """
-    seen: dict[str, None] = {}
-    try:
-        maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    for line in maps.splitlines():
-        parts = line.split(None, 5)
-        if len(parts) < 6:
-            continue
-        path = parts[5].strip()
-        if path.startswith("/") and ".so" in path:
-            seen.setdefault(path, None)
-    return sorted(seen)
+#: **This file no longer reads memory.** It used to open ``/proc/self/maps`` and write
+#: out every shared library the process had loaded. The engine finds the running
+#: application by itself and reads the same thing from outside -- measured 2026-09-02
+#: on a real environment: the published engine, unchanged, still returns 89 libraries
+#: with this file recording none of them. **What is lost** is stated rather than hidden:
+#: once the application is closed the engine has nothing to read and falls back to what
+#: installed packages declare (89 becomes 11); packing says so and tells the user to
+#: start it and pack again.
 
 
 def _owner_of(node_cls: object) -> dict | None:
@@ -287,19 +268,31 @@ def _write_run_record(video_memory: dict | None = None) -> None:
     """
     facts = _env_facts()
     root = facts.get("comfyui_dir") or facts.get("base_path")
-    paths = _mapped_library_paths()
     owners = _node_owners()
-    if not root or not (paths or video_memory or owners):
+    if not root:
         return
     dest = Path(root) / RUN_RECORD_REL
+    # Write when there is something to record, **and also when there is not but a
+    # record already exists**: the earlier figure has to be replaced by what is true
+    # now, even when what is true now is "nothing measured". "Write only when there is
+    # something" used to be enough, because the library list was never empty and so
+    # every run rewrote the file. Once this file stopped reading memory, a run that
+    # ended in an error had nothing to record and returned early -- leaving the video
+    # memory figure from the last *successful* run on disk, to be picked up at packing
+    # time as if it belonged to this one. Caught 2026-09-02 by
+    # test_a_run_that_did_not_finish_never_leaves_a_figure_behind.
+    # The other side holds too: never written before and nothing to record now means
+    # do not create the file at all.
+    if not (video_memory or owners) and not dest.exists():
+        return
     payload = {
-        # 2 adds node_owners. Purely additive -- every reader must go on treating
-        # each part as optional, because a record written by an older install has
-        # none of it and is still perfectly good for the parts it does carry.
-        "record_version": 2,
+        # 2 adds node_owners. 3 drops mapped_library_paths: this file stopped reading
+        # memory, and the engine finds the running application by itself. Readers must
+        # go on treating every part as optional -- a record written by an older install
+        # still carries the old key and is still perfectly good for what it does carry.
+        "record_version": 3,
         "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "python": sys.executable,
-        "mapped_library_paths": paths,
     }
     if owners:
         payload["node_owners"] = owners
