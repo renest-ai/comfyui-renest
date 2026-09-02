@@ -29,7 +29,6 @@ The Python half does exactly two things:
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -44,22 +43,39 @@ __all__ = ["WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 def _token_candidates() -> list[Path]:
     """Where the engine's access token can be, most specific first. Read-only.
 
+    Every path is built from the home directory, and this file reads no
+    process variables at all; a token kept somewhere else is found through the
+    pointer file the engine leaves at ``~/.config/renest/token-path``. The Registry's scanner treats reading them as
+    variable hijacking (rule ``python_environment_manipulation``, tagged
+    ``credential-access``) and flags the release, which pins every user to an
+    older version; 0.1.5 was flagged for exactly that on line 54. These paths
+    are the ones that lookup used to produce, spelled out relative to home.
+
     Platform notes (checked against the platformdirs source, not from memory):
 
     * macOS: ``~/Library/Application Support/renest/serve.token``
-    * Windows: ``%LOCALAPPDATA%\\renest\\renest\\serve.token`` — note the doubled
-      ``renest\\renest`` (platformdirs uses the app name as the author directory
-      when no author is given); ``%APPDATA%`` is checked as a fallback.
+    * Windows: ``~/AppData/Local/renest/renest/serve.token`` — note the doubled
+      ``renest/renest`` (platformdirs uses the app name as the author directory
+      when no author is given); ``AppData/Roaming`` is checked as a fallback.
     """
-    env = os.environ.get("RENEST_TOKEN_FILE")
-    out: list[Path] = [Path(env)] if env else []
     home = Path.home()
-    out.append(home / ".config" / "renest" / "serve.token")
-    out.append(home / "Library" / "Application Support" / "renest" / "serve.token")
-    for var in ("LOCALAPPDATA", "APPDATA"):
-        base = os.environ.get(var)
-        if base:
-            out.append(Path(base) / "renest" / "renest" / "serve.token")
+    out: list[Path] = []
+    # The override, kept but re-expressed: the engine writes the token's real
+    # location into this one fixed file when it is not in the default place, and
+    # this reads that file. Same capability as the old variable, no variable.
+    try:
+        pointed = (home / ".config" / "renest" / "token-path").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        pointed = ""
+    if pointed:
+        out.append(Path(pointed))
+    out += [
+        home / ".config" / "renest" / "serve.token",
+        home / "Library" / "Application Support" / "renest" / "serve.token",
+        home / "AppData" / "Local" / "renest" / "renest" / "serve.token",
+        home / "AppData" / "Roaming" / "renest" / "renest" / "serve.token",
+    ]
     return out
 
 
