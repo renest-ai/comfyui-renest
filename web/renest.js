@@ -240,9 +240,13 @@ async function drawInto(root) {
           "The canvas is empty — load or build a workflow first. Renest saves runs that work; there's nothing to nest yet."));
         return;
       }
-      const body = { ...envOf(info), workflow: prompt.output, dry_run: true };
+      // `output` is what ComfyUI runs; `workflow` is the canvas itself, the only form
+      // ComfyUI's Workflows list can open. Both go, so the restored app opens on this
+      // graph instead of an empty canvas.
+      const recipe = { workflow: prompt.output, workflow_ui: prompt.workflow };
+      const body = { ...envOf(info), ...recipe, dry_run: true };
       const preview = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
-      drawPreview(out, preview, prompt.output);
+      drawPreview(out, preview, recipe);
     } catch (e) {
       out.appendChild(el("p", "color:#e5484d", `Preview failed: ${e.message}`));
     } finally {
@@ -252,7 +256,7 @@ async function drawInto(root) {
   };
 }
 
-function drawPreview(out, preview, workflow) {
+function drawPreview(out, preview, recipe) {
   out.replaceChildren();
   const box = el("div", S.box);
   box.appendChild(el("div", "font-weight:600;margin-bottom:6px", "What goes in the nest"));
@@ -333,7 +337,7 @@ function drawPreview(out, preview, workflow) {
     go.disabled = true;
     go.textContent = "Starting…";
     try {
-      const body = { ...envOf(info), workflow, name: nameInput.value.trim() || undefined };
+      const body = { ...envOf(info), ...recipe, name: nameInput.value.trim() || undefined };
       const res = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
       followJob(out, res.job_id);
     } catch (e) {
