@@ -20,7 +20,10 @@ import { api } from "../../scripts/api.js";
 const SERVE = "http://127.0.0.1:7799/api/v1";
 // uv first: rebuilding an environment calls uv anyway, and `pip install` would
 // install into this very ComfyUI environment — the one you are about to capture.
-const INSTALL_CMD = "uv tool install renest";
+// `--upgrade`: on a machine that already has an older copy, the bare install is a
+// silent no-op (uv sees "installed" and leaves the old version). On a fresh machine
+// it changes nothing, so one command serves both.
+const INSTALL_CMD = "uv tool install --upgrade renest";
 const SERVE_CMD = "renest serve";
 
 let token = null; // memory only — never persisted
@@ -84,9 +87,12 @@ function envOf(i) {
   // desktop app has none), the engine reads the installed packages from it —
   // without this, such a nest ships with no dependency list at all.
   if (i.python) body.env_python = i.python;
-  // comfyui_dir is deliberately not sent: the engine would then also look for custom
-  // nodes and models under that tree, while on the desktop app those live under the
-  // data folder instead.
+  // comfyui_dir is deliberately not sent as the scan target: the engine would then
+  // also look for custom nodes and models under that tree, while on the desktop app
+  // those live under the data folder instead. It IS sent as program_dir — the
+  // engine's run-record lookup needs the program tree separately; without it, node
+  // ownership is read from the wrong tree on split installs.
+  if (i.comfyui_dir && i.comfyui_dir !== i.base_path) body.program_dir = i.comfyui_dir;
   return body;
 }
 
@@ -199,8 +205,8 @@ async function drawInto(root) {
       // Sentence-initial: the brand form, capitalised. The bare command name at the
       // start of a sentence reads as a typo to everyone who does not already know
       // that the command is spelled in lower case.
-      "Renest is a general rebuild tool — one command saves the models, custom nodes, " +
-      "dependency locks and workflow behind a working run, verified byte by byte."));
+      "Renest saves the models, custom nodes, dependency locks and workflow behind a " +
+      "working run, and checks every file byte for byte."));
     root.appendChild(guide);
     const retry = el("button", S.sec, "Check again");
     retry.onclick = render;
@@ -389,7 +395,7 @@ function followJob(out, jobId) {
         head.textContent = "✓ Nested & verified";
         // Always show where it landed — people need to find it, back it up, hand it on.
         const where = (job.result || {}).manifest_path;
-        stageLine.textContent = "This run can now be rebuilt byte-for-byte on any machine you rent.";
+        stageLine.textContent = "Its files and dependencies are saved to the nest and checked byte for byte.";
         if (where) {
           const p = el("div", "font-family:monospace;font-size:11px;opacity:.7;margin-top:6px;word-break:break-all",
             where.replace(/\/manifest\.json$/, ""));
@@ -399,7 +405,7 @@ function followJob(out, jobId) {
         // to this element, so removing it first threw and took the path (and the
         // toast) down with it. Caught by looking at the screenshot, not by a test.
         log.remove();
-        toast("success", "Nested", "Saved and verified — rebuild it anywhere.");
+        toast("success", "Nested", "Files and dependencies saved and checked.");
       } else {
         head.textContent = job.state === "failed" ? "✗ Packing failed" : `Stopped (${job.state})`;
         const err = job.error || {};
@@ -419,7 +425,7 @@ app.registerExtension({
         id: "renest",
         icon: "pi pi-inbox",
         title: "Renest",
-        tooltip: "Nest this run — rebuild it anywhere",
+        tooltip: "Nest this run — save its files and dependencies",
         type: "custom",
         render: (elArg) => { panelEl = elArg; render(); },
       });

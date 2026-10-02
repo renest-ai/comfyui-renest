@@ -1,12 +1,15 @@
 # comfyui-renest
 
-**Nest a working run — rebuild it anywhere, byte for byte.**
+**Nest a working run — save its files and dependencies, checked byte for byte.**
 
-The official [Renest](https://renest.ai) panel for ComfyUI. The moment a run
-succeeds, one click saves everything that run depended on — models, custom nodes,
-dependency versions, the workflow itself — into a single open-format archive
-(a "nest"). Restore it later on any machine you rent and get the same run back,
-verified byte for byte.
+Renest saves a ComfyUI or fine-tuning setup that already worked on a rented GPU — the model files, custom nodes, exact package versions and workflow — and brings it back on another Linux GPU machine, every file checked against its SHA-256. It promises that the files and dependencies come back verified; whether the app then runs is tested on every restore and reported, not promised.
+
+This is the official [Renest](https://renest.ai) panel for ComfyUI. The moment a run
+succeeds, **Nest this run** saves everything that run depended on — models, custom nodes,
+dependency versions, the workflow itself — into a single open-format archive (a "nest")
+on this machine's disk, and checks every file byte for byte. Restore it later on another
+machine and those files and dependencies come back, checked again against the same
+fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
 
 ## What it looks like
 
@@ -32,7 +35,7 @@ git clone https://github.com/renest-ai/comfyui-renest
 Then install the Renest engine (any terminal, once per machine):
 
 ```bash
-uv tool install renest
+uv tool install --upgrade renest
 # no uv yet?  curl -LsSf https://astral.sh/uv/install.sh | sh
 #             or:  pip install uv   (a single binary, no dependencies —
 #             safe to run inside this ComfyUI environment)

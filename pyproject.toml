@@ -3,8 +3,8 @@
 # engine over loopback HTTP.
 [project]
 name = "comfyui-renest"
-description = "Nest a working run - rebuild it anywhere, byte for byte. Official Renest panel."
-version = "0.1.7"
+description = "Official Renest panel: save a ComfyUI run that worked - models, custom nodes, exact package versions, workflow - and bring it back on another Linux GPU machine, every file checked against its SHA-256."
+version = "0.1.8"
 license = { file = "LICENSE" }
 dependencies = []
 
