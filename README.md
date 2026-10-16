@@ -7,7 +7,8 @@ Renest saves a ComfyUI or fine-tuning setup that already worked on a rented GPU 
 This is the official [Renest](https://renest.ai) panel for ComfyUI. The moment a run
 succeeds, **Nest this run** saves everything that run depended on — models, custom nodes,
 dependency versions, the workflow itself — into a single open-format archive (a "nest")
-on this machine's disk, and checks every file byte for byte. Restore it later on another
+on this machine's disk, checks every file byte for byte, and uploads it to your Renest
+drive once you approve that upload in your browser. Restore it later on another
 machine and those files and dependencies come back, checked again against the same
 fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
 
@@ -17,7 +18,8 @@ fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
 - After a successful run: **Nest this run** → a preview of exactly what will be
   saved (models / ComfyUI itself / custom nodes / dependency locks, with sizes),
   anything that could not be captured, and where the nest will be written →
-  confirm → live progress until it is saved **and verified**.
+  confirm → a short code to approve in your browser → live progress until it is
+  saved, verified and on your Renest drive.
 - If the Renest engine isn't installed yet, the tab shows the two commands that
   install it. Nothing else to configure.
 
@@ -40,8 +42,14 @@ uv tool install --upgrade renest
 #             or:  pip install uv   (a single binary, no dependencies —
 #             safe to run inside this ComfyUI environment)
 # or, if you know this environment is separate: pip install renest
+renest login
 renest serve
 ```
+
+`renest login` signs this machine in to your Renest account: it prints a page and a
+code, you approve them in your browser, and the machine keeps a sign-in that can only
+*ask* for an upload. Every upload from the panel is then approved by you, once, in
+your own browser.
 
 The engine is a separate program with its own licence (source-available: the code
 is public to read and audit, but it is not open source; its escape hatch and the
@@ -57,16 +65,24 @@ a restart — a home directory there often does not.
 
 ## How it works, and what never happens
 
-- The panel talks to the engine over **loopback HTTP only** (`127.0.0.1:7799`),
-  authenticated with a token the engine writes on this machine. It never imports
-  the engine's code: the process boundary is also the licence boundary.
-- **The token stays in memory.** The panel's Python half reads the token file and
-  hands the value to the browser code, which keeps it in a variable — never in
-  localStorage, sessionStorage or a cookie.
+- **The panel works on a rented machine, opened from your own browser.** The browser
+  only ever talks to ComfyUI's own address (`/renest/api/...`). The panel's Python
+  half, running next to ComfyUI, passes each call on to the engine over **loopback
+  HTTP only** (`127.0.0.1:7799` on that machine). It never imports the engine's code:
+  the process boundary is also the licence boundary.
+- **The engine's token never reaches your browser.** The Python half reads it from
+  the file the engine writes on that machine and adds it to each call it passes on.
+- **Only the calls the panel needs are passed on**: check the engine, preview and
+  pack, follow and cancel that job. Which folder gets packed and where the nest is
+  written are decided on the machine, never by what the browser sends. Anyone who
+  can open your ComfyUI can use the panel too, so keep that address to yourself.
 - **No cloud credentials pass through here.** Bucket keys and account tokens are
   the engine's business; this panel never sees, stores or forwards them.
-- **Nothing is uploaded by this panel.** A nest is written to your own disk. What
-  you do with it afterwards is up to you.
+- **Nothing is uploaded without your approval.** A nest is written to your own disk
+  first. Each upload to your Renest drive asks for your approval in your own browser,
+  from the account this machine was signed in to; the permission it gets covers that
+  one upload only and is withdrawn when it ends. The machine keeps nothing that can
+  upload by itself.
 - **Nests carry no absolute paths from your machine.** The archive records where
   things go relative to the environment, not where they came from — so handing a
   nest to someone else does not hand over your folder layout or your user name.

@@ -4,20 +4,19 @@
  * General Public License, version 3 or (at your option) any later version;
  * distributed WITHOUT ANY WARRANTY. See the LICENSE file for the full terms.
  *
- * Talks ONLY to:
- *  - its own Python half (/renest/info, /renest/token) via the ComfyUI api client;
- *  - the local Renest engine at http://127.0.0.1:7799/api/v1. That HTTP surface is
- *    the whole contract — this extension never imports the engine's code, because
- *    the process boundary is also the licence boundary.
+ * Talks ONLY to its own Python half, on ComfyUI's own address, through the ComfyUI
+ * api client. Calls to the Renest engine go to /renest/api/..., and the Python half
+ * forwards them to the engine on the machine running ComfyUI.
  *
- * Token discipline: the engine's access token lives in a module variable only.
- * It is never written to localStorage, sessionStorage or cookies.
+ * Why not straight to http://127.0.0.1:7799: this code runs in the user's browser.
+ * On a rented machine that browser is on their own computer, so 127.0.0.1 is their
+ * laptop and the engine on the rented machine is out of reach. Going through
+ * ComfyUI also means the engine's access token never reaches the browser at all.
  */
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const SERVE = "http://127.0.0.1:7799/api/v1";
 // uv first: rebuilding an environment calls uv anyway, and `pip install` would
 // install into this very ComfyUI environment — the one you are about to capture.
 // `--upgrade`: on a machine that already has an older copy, the bare install is a
@@ -25,76 +24,68 @@ const SERVE = "http://127.0.0.1:7799/api/v1";
 // it changes nothing, so one command serves both.
 const INSTALL_CMD = "uv tool install --upgrade renest";
 const SERVE_CMD = "renest serve";
+// Uploads from this panel are approved in the browser, and the engine may only ask for
+// that approval once this machine is signed in from its own terminal.
+const LOGIN_CMD = "renest login";
 
-let token = null; // memory only — never persisted
-let info = null; // {base_path, comfyui_dir, python, token_present}
 let panelEl = null;
 let pollTimer = null;
 let lastRunFlag = false; // a run succeeded since panel last rendered
+// The graph that last ran to the end, as ComfyUI runs it, read the moment the run
+// finished. Renest only saves runs that worked, so the panel only nests the canvas
+// when it is still exactly this graph. Read at the end of the run rather than when
+// it was queued: a seed set to "randomize" has already moved on by then, and the
+// canvas shows the moved-on value.
+let lastGoodGraph = null;
+
+const graphKey = (output) => JSON.stringify(output);
 
 // ---------------------------------------------------------------- helpers --
-async function fetchInfo() {
-  const r = await api.fetchApi("/renest/info");
-  if (!r.ok) throw new Error("renest info route missing");
-  return r.json();
-}
+const BRIDGE = "/renest/api";
 
-async function fetchToken() {
-  if (token) return token;
-  const r = await api.fetchApi("/renest/token");
-  if (!r.ok) return null;
-  token = (await r.json()).token;
-  return token;
-}
-
-async function serveAlive() {
+/** Where the engine stands: "ready", "engine_unreachable", "token_missing", or
+ * "panel_backend_missing" (this file loaded but its Python half did not). */
+async function engineState() {
+  let r;
   try {
-    const r = await fetch(`${SERVE}/health`, { signal: AbortSignal.timeout(1500) });
-    return r.ok;
+    r = await api.fetchApi(`${BRIDGE}/health`, { signal: AbortSignal.timeout(5000) });
   } catch {
-    return false;
+    return "engine_unreachable";
   }
+  if (r.ok) return "ready";
+  let body = {};
+  try { body = await r.json(); } catch { /* not ours */ }
+  if (body.renest_bridge_error) return body.renest_bridge_error;
+  return r.status === 404 ? "panel_backend_missing" : "engine_unreachable";
 }
 
 async function serveFetch(path, opts = {}) {
-  const t = await fetchToken();
-  if (!t) throw new Error("No access token yet — run `renest serve` once on this machine");
-  const r = await fetch(`${SERVE}${path}`, {
+  const r = await api.fetchApi(`${BRIDGE}${path}`, {
     ...opts,
-    headers: {
-      Authorization: `Bearer ${t}`,
-      "Content-Type": "application/json",
-      ...(opts.headers || {}),
-    },
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   });
   if (!r.ok) {
     let detail = `HTTP ${r.status}`;
+    let errorClass = null;
     try {
       const body = await r.json();
-      detail = body.error || body.detail || detail;
+      detail = body.error || body.detail || BRIDGE_ERRORS[body.renest_bridge_error] || detail;
+      errorClass = body.error_class || null;
     } catch { /* keep status text */ }
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.errorClass = errorClass;
+    throw err;
   }
   return r.json();
 }
 
-// What this installation actually looks like. The ComfyUI desktop app keeps data,
-// program and Python environment in three different places, which the engine cannot
-// work out from a single folder — but this code runs inside ComfyUI, so it just tells it.
-function envOf(i) {
-  const body = { target: i.base_path };
-  // The interpreter running ComfyUI. When the environment has no lock file (the
-  // desktop app has none), the engine reads the installed packages from it —
-  // without this, such a nest ships with no dependency list at all.
-  if (i.python) body.env_python = i.python;
-  // comfyui_dir is deliberately not sent as the scan target: the engine would then
-  // also look for custom nodes and models under that tree, while on the desktop app
-  // those live under the data folder instead. It IS sent as program_dir — the
-  // engine's run-record lookup needs the program tree separately; without it, node
-  // ownership is read from the wrong tree on split installs.
-  if (i.comfyui_dir && i.comfyui_dir !== i.base_path) body.program_dir = i.comfyui_dir;
-  return body;
-}
+// The bridge's own answers, as a person would say them.
+const BRIDGE_ERRORS = {
+  engine_unreachable: "The Renest engine stopped answering on this machine.",
+  token_missing: "The Renest engine has no access token yet — restart `renest serve`.",
+  not_allowed: "The panel asked the engine for something it does not forward.",
+  bad_request: "The panel sent a request the engine could not read.",
+};
 
 function fmtBytes(n) {
   if (!n && n !== 0) return "?";
@@ -102,6 +93,18 @@ function fmtBytes(n) {
   let i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
   return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** The engine names a nest "<folder> <date>" by the machine's clock, and a rented machine
+ * runs on UTC: packed at 02:17 in Beijing, it says yesterday. A name is for the person,
+ * so the date in it is theirs — the browser is the one place that knows their time zone.
+ * Only a trailing YYYY-MM-DD is swapped; a name the engine got from elsewhere is left alone. */
+function withLocalDate(name) {
+  if (typeof name !== "string") return name;
+  const d = new Date();
+  const local = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-` +
+    String(d.getDate()).padStart(2, "0");
+  return name.replace(/ \d{4}-\d{2}-\d{2}$/, ` ${local}`);
 }
 
 function el(tag, style, text) {
@@ -154,6 +157,40 @@ async function copyText(text) {
   }
 }
 
+/** Only ever link to a web page: the address comes from the engine, which got it from
+ * the Renest service, and a link is the one place a stray scheme could run code. */
+function safeHttpUrl(u) {
+  try {
+    const parsed = new URL(String(u));
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function linkOut(href, text) {
+  const a = el("a", "color:#4cc38a;text-decoration:underline;cursor:pointer", text);
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
+/** This machine has no Renest sign-in: say so, and hand over the one command. */
+function drawSignIn(out, message) {
+  out.replaceChildren();
+  const box = el("div", S.box);
+  box.appendChild(el("div", "font-weight:600", "Sign this machine in first"));
+  box.appendChild(el("p", S.sub + ";margin-top:4px", message ||
+    "This machine is not signed in to Renest. In its terminal, run:"));
+  const c = el("code", S.code, LOGIN_CMD);
+  c.appendChild(copyBtn(LOGIN_CMD));
+  box.appendChild(c);
+  box.appendChild(el("p", S.sub + ";margin-top:8px",
+    "It shows a code to approve in your browser. Then press \"Nest this run\" again."));
+  out.appendChild(box);
+}
+
 function toast(severity, summary, detail) {
   try {
     app.extensionManager.toast.add({ severity, summary, detail, life: 6000 });
@@ -189,8 +226,16 @@ async function drawInto(root) {
   const status = el("p", S.sub, "Checking the local Renest engine…");
   root.appendChild(status);
 
-  const alive = await serveAlive();
-  if (!alive) {
+  const state = await engineState();
+  if (state === "panel_backend_missing") {
+    status.textContent = "Plugin backend missing — reinstall comfyui-renest and restart ComfyUI.";
+    return;
+  }
+  if (state === "token_missing") {
+    status.textContent = "Engine found, but no access token yet — restart `renest serve` and reopen.";
+    return;
+  }
+  if (state !== "ready") {
     // No engine yet: show the two commands that install it, rather than a dead end.
     status.textContent = "The Renest engine isn't running on this machine yet.";
     const guide = el("div", S.box);
@@ -214,15 +259,9 @@ async function drawInto(root) {
     return;
   }
 
-  info = info || await fetchInfo().catch(() => null);
-  if (!info) { status.textContent = "Plugin backend missing — reinstall comfyui-renest."; return; }
-  if (!info.token_present) {
-    status.textContent = "Engine found, but no access token yet — run `renest serve` once and reopen.";
-    return;
-  }
   status.textContent = lastRunFlag
-    ? "That run worked — nest it before the machine does something you'll regret."
-    : "Engine ready. Nest the current workflow whenever it works.";
+    ? "That run worked — you can nest it now."
+    : "Engine ready. Run your workflow once; when it finishes, you can nest it.";
 
   const nestBtn = el("button", S.pri, "Nest this run");
   root.appendChild(nestBtn);
@@ -240,11 +279,19 @@ async function drawInto(root) {
           "The canvas is empty — load or build a workflow first. Renest saves runs that work; there's nothing to nest yet."));
         return;
       }
+      if (graphKey(prompt.output) !== lastGoodGraph) {
+        out.appendChild(el("p", "opacity:.75", lastGoodGraph
+          ? "This workflow has changed since its last run finished. Run it once more and let " +
+            "it finish — Renest only saves a run that worked."
+          : "Run this workflow once and let it finish first — Renest only saves a run that worked."));
+        return;
+      }
       // `output` is what ComfyUI runs; `workflow` is the canvas itself, the only form
       // ComfyUI's Workflows list can open. Both go, so the restored app opens on this
       // graph instead of an empty canvas.
       const recipe = { workflow: prompt.output, workflow_ui: prompt.workflow };
-      const body = { ...envOf(info), ...recipe, dry_run: true };
+      // Which folder to pack is filled in on the machine, not here: see the bridge.
+      const body = { ...recipe, dry_run: true };
       const preview = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
       drawPreview(out, preview, recipe);
     } catch (e) {
@@ -294,7 +341,7 @@ function drawPreview(out, preview, recipe) {
     // split mid-word at whatever column the panel happened to end at
     // ("…/renest-ne" + "ts"), which reads like a typo. ``anywhere`` moves the whole
     // path down first and only breaks it if it still does not fit.
-    const where = el("div", "font-size:11px;opacity:.6;margin-top:6px", "Saved on this machine to");
+    const where = el("div", "font-size:11px;opacity:.6;margin-top:6px", "Packed on this machine in");
     where.appendChild(el("div", "font-family:monospace;overflow-wrap:anywhere;opacity:.9",
       preview.out_dir));
     box.appendChild(where);
@@ -323,11 +370,14 @@ function drawPreview(out, preview, recipe) {
     out.appendChild(warn);
   }
 
+  out.appendChild(el("p", S.sub + ";margin-top:8px;font-size:12px",
+    "Then it is uploaded to your Renest drive. You approve each upload once, in your browser."));
+
   const nameWrap = el("div", "display:flex;gap:8px;margin-top:10px;align-items:center");
   const nameInput = el("input",
     "flex:1;padding:8px 10px;font-size:13px;border:1px solid #555;border-radius:6px;" +
     "background:transparent;color:inherit");
-  nameInput.value = preview.default_name || "my-run";
+  nameInput.value = withLocalDate(preview.default_name) || "my-run";
   const go = el("button", S.pri, "Confirm & nest");
   nameWrap.appendChild(nameInput);
   nameWrap.appendChild(go);
@@ -337,10 +387,22 @@ function drawPreview(out, preview, recipe) {
     go.disabled = true;
     go.textContent = "Starting…";
     try {
-      const body = { ...envOf(info), ...recipe, name: nameInput.value.trim() || undefined };
+      // The preview was of the canvas as it was then. Switching tabs or editing since
+      // would otherwise nest the old graph under a list that no longer matches it.
+      const now = await app.graphToPrompt();
+      if (graphKey(now.output) !== graphKey(recipe.workflow)) {
+        out.replaceChildren(el("p", "opacity:.75",
+          "The canvas changed after this preview. Press \"Nest this run\" again to preview what is there now."));
+        return;
+      }
+      const body = { ...recipe, name: nameInput.value.trim() || undefined };
       const res = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
       followJob(out, res.job_id);
     } catch (e) {
+      if (e.errorClass === "NOT_SIGNED_IN") {
+        drawSignIn(out, e.message);
+        return;
+      }
       out.appendChild(el("p", "color:#e5484d", `Couldn't start: ${e.message}`));
       go.disabled = false;
       go.textContent = "Confirm & nest";
@@ -372,7 +434,28 @@ function followJob(out, jobId) {
   bar.appendChild(fill);
   const log = el("div", S.log, "");
   const cancel = el("button", S.sec, "Cancel");
-  out.append(head, stageLine, bar, log, cancel);
+  // Shown while the engine waits for the upload to be approved in the browser.
+  const waiting = el("div", S.box);
+  waiting.style.display = "none";
+  out.append(head, waiting, stageLine, bar, log, cancel);
+  let shownCode = null;
+
+  function showApproval(approval) {
+    if (shownCode === approval.user_code) return;
+    shownCode = approval.user_code;
+    waiting.replaceChildren();
+    waiting.appendChild(el("div", "font-weight:600", "Approve this upload"));
+    waiting.appendChild(el("div", S.sub + ";margin-top:4px",
+      "Check that the approval page shows this code:"));
+    waiting.appendChild(el("div",
+      "font-family:monospace;font-size:20px;font-weight:700;letter-spacing:2px;margin:6px 0",
+      approval.user_code || "?"));
+    const href = safeHttpUrl(approval.verify_url);
+    if (href) waiting.appendChild(linkOut(href, "Open approval page"));
+    waiting.appendChild(el("p", S.sub + ";margin-top:8px",
+      "Waiting for you to approve in your browser…"));
+    waiting.style.display = "";
+  }
 
   cancel.onclick = async () => {
     try { await serveFetch(`/jobs/${jobId}`, { method: "DELETE" }); } catch { /* already done */ }
@@ -383,6 +466,18 @@ function followJob(out, jobId) {
     let job;
     try { job = await serveFetch(`/jobs/${jobId}`); }
     catch (e) { stageLine.textContent = `poll failed: ${e.message}`; return; }
+    if (job.approval && job.state === "running") {
+      head.textContent = "Waiting for approval";
+      bar.style.display = "none";
+      stageLine.textContent = "";
+      showApproval(job.approval);
+      return;
+    }
+    if (shownCode !== null) {
+      waiting.style.display = "none";
+      bar.style.display = "";
+      head.textContent = "Packing…";
+    }
     const p = job.progress || {};
     stageLine.textContent = `${job.state}${job.stage ? ` · stage ${job.stage}` : ""}` +
       (p.speed_mbps ? ` · ${p.speed_mbps.toFixed(0)} Mbps` : "");
@@ -394,12 +489,18 @@ function followJob(out, jobId) {
     if (["succeeded", "failed", "cancelled", "interrupted"].includes(job.state)) {
       clearInterval(pollTimer);
       cancel.remove();
+      waiting.remove();
+      bar.style.display = "";
       if (job.state === "succeeded") {
         fill.style.width = "100%";
-        head.textContent = "✓ Nested & verified";
-        // Always show where it landed — people need to find it, back it up, hand it on.
-        const where = (job.result || {}).manifest_path;
-        stageLine.textContent = "Its files and dependencies are saved to the nest and checked byte for byte.";
+        head.textContent = "✓ Saved to your Renest drive";
+        const result = job.result || {};
+        const drive = result.drive || {};
+        stageLine.textContent = "Its files and dependencies were checked on this machine and uploaded.";
+        const href = safeHttpUrl(drive.console_url);
+        if (href) out.insertBefore(linkOut(href, "Open it on your Renest drive"), log);
+        // Also where the packed copy sits on this machine -- people back it up, hand it on.
+        const where = result.manifest_path;
         if (where) {
           const p = el("div", "font-family:monospace;font-size:11px;opacity:.7;margin-top:6px;word-break:break-all",
             where.replace(/\/manifest\.json$/, ""));
@@ -409,11 +510,16 @@ function followJob(out, jobId) {
         // to this element, so removing it first threw and took the path (and the
         // toast) down with it. Caught by looking at the screenshot, not by a test.
         log.remove();
-        toast("success", "Nested", "Files and dependencies saved and checked.");
+        toast("success", "Saved to your Renest drive", "Files and dependencies checked and uploaded.");
+      } else if ((job.error || {}).error_class === "NOT_SIGNED_IN") {
+        clearInterval(pollTimer);
+        drawSignIn(out, job.error.human);
       } else {
         head.textContent = job.state === "failed" ? "✗ Packing failed" : `Stopped (${job.state})`;
         const err = job.error || {};
-        stageLine.textContent = err.human || err.detail || "See the log above.";
+        stageLine.textContent = err.human || err.detail || (job.state === "cancelled"
+          ? "Cancelled. Nothing from this run was saved to your drive."
+          : "See the log below.");
         if (job.state === "failed") toast("error", "Packing failed", stageLine.textContent);
       }
     }
@@ -438,9 +544,16 @@ app.registerExtension({
     }
     // The moment a run succeeds is the moment worth saving — this tool only ever
     // reproduces runs that already worked, so that is exactly when to offer it.
-    api.addEventListener("execution_success", () => {
+    api.addEventListener("execution_success", async () => {
       lastRunFlag = true;
-      toast("info", "Run succeeded", "Nest it from the Renest tab — before the pod disappears.");
+      try {
+        lastGoodGraph = graphKey((await app.graphToPrompt()).output);
+      } catch {
+        lastGoodGraph = null; // could not read the canvas: the panel asks for another run
+      }
+      // No "before the machine disappears" here: until the nest is in the cloud drive it
+      // sits on this machine's own disk, and a warning that implies otherwise misleads.
+      toast("info", "Run succeeded", "You can nest it from the Renest tab.");
       if (panelEl) render();
     });
   },

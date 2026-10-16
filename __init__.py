@@ -19,8 +19,12 @@ Boundaries, on purpose:
 
 The Python half does exactly two things:
 
-1. the token bridge — read the engine's local access token and hand it to the
-   panel's browser code, which keeps it in a variable and never persists it;
+1. the bridge — pass the panel's calls on to the engine. The browser cannot do
+   that itself: on a rented machine the browser runs on the user's own computer,
+   so ``127.0.0.1`` in the browser is *their laptop*, not the machine running
+   ComfyUI. The panel calls ``/renest/api/...`` on ComfyUI's own address instead,
+   and this file forwards it to the engine on this machine's loopback, adding the
+   engine's access token on the way. The token never reaches the browser;
 2. report the shape of this installation — where the data lives, where ComfyUI
    itself lives, and which Python is running it. Only code inside ComfyUI's
    process can know these, and the engine needs them to pack the right things.
@@ -28,9 +32,13 @@ The Python half does exactly two things:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -367,6 +375,90 @@ def _watch_for_finished_runs() -> None:
     server.send_sync = send_sync
 
 
+#: The engine, on this machine's loopback. A module constant rather than anything
+#: read at run time, so the bridge can only ever reach this one address.
+ENGINE = "http://127.0.0.1:7799/api/v1"
+
+#: Seconds to wait for the engine. A preview reads every model the workflow uses,
+#: which on a large setup takes minutes; everything else answers at once.
+PREVIEW_TIMEOUT_S = 900.0
+QUICK_TIMEOUT_S = 15.0
+
+_JOB_PATH = re.compile(r"^jobs/job_[0-9a-f]{24}$")
+
+
+def _bridge_allows(method: str, tail: str) -> bool:
+    """Exactly the calls the panel makes, and nothing else.
+
+    Whoever can open this ComfyUI can call the bridge — on a rented machine that is
+    anyone holding its address. So the list is what the panel needs, not what the
+    engine offers: no restore (it installs software), no list of nests.
+    """
+    if (method, tail) in (("GET", "health"), ("POST", "pack")):
+        return True
+    return method in ("GET", "DELETE") and _JOB_PATH.match(tail) is not None
+
+
+#: The parts of a pack request the browser decides. Everything else is filled in here.
+_PACK_FROM_BROWSER = ("workflow", "workflow_ui", "name", "dry_run")
+
+
+def _pack_request(raw: bytes) -> bytes | None:
+    """Rebuild a pack request from the browser's part and this machine's facts.
+
+    **Which folder to pack, and where to write the result, are not the browser's to
+    say.** The engine takes both from the request; passed through as sent, anyone who
+    can open this ComfyUI could pack any folder on the machine, or write anywhere.
+    So only the workflow, the name and "preview or real" come from the browser, and
+    the folders come from ``_env_facts`` — the same values the panel used to send,
+    read here instead. ``upload`` is always on, set here.
+    """
+    try:
+        sent = json.loads(raw or b"{}")
+    except ValueError:
+        return None
+    if not isinstance(sent, dict):
+        return None
+    body = {k: sent[k] for k in _PACK_FROM_BROWSER if k in sent}
+    # The panel path always goes to the Renest drive, and every upload is approved
+    # once in the person's own browser (the engine asks for that approval). Set here,
+    # never taken from the browser: whoever can open this ComfyUI does not get to
+    # decide what kind of job the engine runs.
+    body["upload"] = True
+    facts = _env_facts()
+    body["target"] = facts["base_path"]
+    if facts.get("python"):
+        body["env_python"] = facts["python"]
+    # ComfyUI's own program tree, only when it is a different place (the desktop
+    # app keeps it apart from the data folder). Sent as program_dir, never as the
+    # target: the engine would also look for custom nodes and models under it.
+    if facts.get("comfyui_dir") and facts["comfyui_dir"] != facts["base_path"]:
+        body["program_dir"] = facts["comfyui_dir"]
+    return json.dumps(body).encode("utf-8")
+
+
+#: No proxy, ever: an opener built with an empty proxy table goes straight to the
+#: address. The default one would send loopback calls through whatever proxy the
+#: machine is configured with.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _forward(method: str, tail: str, body: bytes | None, token: str | None,
+             timeout: float) -> tuple[int, bytes] | None:
+    """One call to the engine. ``None`` means the engine is not there at all."""
+    req = urllib.request.Request(f"{ENGINE}/{tail}", data=body, method=method)
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with _OPENER.open(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except (urllib.error.URLError, OSError):
+        return None
+
+
 def _register_routes() -> None:
     from aiohttp import web
     from server import PromptServer
@@ -381,22 +473,44 @@ def _register_routes() -> None:
         """
         return web.json_response({**_env_facts(), "token_present": _read_token() is not None})
 
-    @routes.get("/renest/token")
-    async def renest_token(request: web.Request) -> web.Response:
-        """Hand the engine's access token to the panel's browser code.
+    def _bridge_error(code: str, status: int = 503) -> web.Response:
+        return web.json_response({"renest_bridge_error": code}, status=status)
 
-        The exposure is bounded: the engine listens on 127.0.0.1 only, so the
-        token is meaningless off this machine — even if ComfyUI itself is exposed
-        to a LAN, a remote caller cannot reach the loopback engine. The browser
-        side keeps the token in a variable and writes it nowhere.
+    async def renest_bridge(request: web.Request) -> web.Response:
+        """Pass one panel call on to the engine and hand back what it said, unchanged.
+
+        Two answers come from here rather than the engine, so the panel can tell
+        them apart: ``engine_unreachable`` (nothing is listening — not installed,
+        or not started) and ``token_missing`` (the engine is up but has not written
+        its access token where this file looks).
         """
+        method, tail = request.method, request.match_info.get("tail", "")
+        if not _bridge_allows(method, tail):
+            return _bridge_error("not_allowed", 404)
+        body = None
+        if method == "POST":
+            body = _pack_request(await request.read())
+            if body is None:
+                return _bridge_error("bad_request", 400)
+        # Read fresh on every call, so a new token needs no ComfyUI restart.
         token = _read_token()
-        if token is None:
-            return web.json_response(
-                {"error": "No Renest access token yet — run `renest serve` once on this machine."},
-                status=404,
-            )
-        return web.json_response({"token": token})
+        if token is None and tail != "health":
+            return _bridge_error("token_missing")
+        timeout = PREVIEW_TIMEOUT_S if method == "POST" else QUICK_TIMEOUT_S
+        # The call blocks, so it runs off ComfyUI's event loop: a preview that
+        # takes minutes must not freeze the app's own interface meanwhile.
+        loop = asyncio.get_running_loop()
+        answer = await loop.run_in_executor(None, _forward, method, tail, body, token, timeout)
+        if answer is None:
+            return _bridge_error("engine_unreachable")
+        if tail == "health" and token is None:
+            return _bridge_error("token_missing")
+        status, raw = answer
+        return web.Response(status=status, body=raw, content_type="application/json")
+
+    routes.get("/renest/api/{tail:.*}")(renest_bridge)
+    routes.post("/renest/api/{tail:.*}")(renest_bridge)
+    routes.delete("/renest/api/{tail:.*}")(renest_bridge)
 
 
 try:
