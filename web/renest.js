@@ -27,6 +27,13 @@ const SERVE_CMD = "renest serve";
 // Uploads from this panel are approved in the browser, and the engine may only ask for
 // that approval once this machine is signed in from its own terminal.
 const LOGIN_CMD = "renest login";
+// The web console's sign-up page, for someone who has no Renest account to sign in to.
+const REGISTER_URL = "https://app.renest.ai/register";
+// What a nest kept on this machine is, where it sits, and how to take it with you.
+const LOCAL_NEST_DOCS_URL = "https://renest.ai/docs/plugin-nest-this-run#where";
+// Refusals that mean "your drive will not take this" — a plan without cloud storage, or
+// a full drive. Packing on this machine stays free, so these offer that instead.
+const DRIVE_REFUSALS = new Set(["PLAN_CANNOT_PACK", "QUOTA_EXCEEDED"]);
 
 let panelEl = null;
 let pollTimer = null;
@@ -176,8 +183,30 @@ function linkOut(href, text) {
   return a;
 }
 
-/** This machine has no Renest sign-in: say so, and hand over the one command. */
-function drawSignIn(out, message) {
+/** The ways forward the Renest service offered with a refusal, as links. The engine
+ * already dropped anything that is not a web page; checked again here, because a link
+ * is the one place a stray scheme could run code. */
+function drawActions(parent, actions) {
+  if (!Array.isArray(actions)) return;
+  const row = el("div", "display:flex;flex-wrap:wrap;gap:12px;margin-top:8px");
+  for (const a of actions.slice(0, 4)) {
+    const href = safeHttpUrl(a && a.url);
+    const label = a && typeof a.label === "string" ? a.label : "";
+    if (href && label) row.appendChild(linkOut(href, label));
+  }
+  if (row.childNodes.length) parent.appendChild(row);
+}
+
+/** The free way out: pack the same run onto this machine's disk instead. */
+function localInsteadBtn(out, ctx) {
+  const b = el("button", S.sec + ";margin-top:10px", "Save on this machine instead");
+  b.onclick = () => startPack(out, ctx.recipe, ctx.name, "local", ctx);
+  return b;
+}
+
+/** This machine has no Renest sign-in: say so, hand over the one command, and point
+ * someone without an account at the sign-up page. */
+function drawSignIn(out, message, ctx) {
   out.replaceChildren();
   const box = el("div", S.box);
   box.appendChild(el("div", "font-weight:600", "Sign this machine in first"));
@@ -188,7 +217,38 @@ function drawSignIn(out, message) {
   box.appendChild(c);
   box.appendChild(el("p", S.sub + ";margin-top:8px",
     "It shows a code to approve in your browser. Then press \"Nest this run\" again."));
+  const signUp = el("p", S.sub + ";margin-top:8px", "No Renest account yet? ");
+  signUp.appendChild(linkOut(REGISTER_URL, "Create one"));
+  box.appendChild(signUp);
   out.appendChild(box);
+  if (ctx && ctx.recipe) out.appendChild(localInsteadBtn(out, ctx));
+}
+
+/** Start the real pack of a previewed run. ``destination`` is "drive" or "local"; the
+ * machine decides everything else (see the bridge). */
+async function startPack(out, recipe, name, destination, ctx) {
+  const job = { ...(ctx || {}), recipe, name, destination };
+  try {
+    // The preview was of the canvas as it was then. Switching tabs or editing since
+    // would otherwise nest the old graph under a list that no longer matches it.
+    const now = await app.graphToPrompt();
+    if (graphKey(now.output) !== graphKey(recipe.workflow)) {
+      out.replaceChildren(el("p", "opacity:.75",
+        "The canvas changed after this preview. Press \"Nest this run\" again to preview what is there now."));
+      return false;
+    }
+    const body = { ...recipe, name, destination };
+    const res = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
+    followJob(out, res.job_id, job);
+    return true;
+  } catch (e) {
+    if (e.errorClass === "NOT_SIGNED_IN") {
+      drawSignIn(out, e.message, job);
+      return false;
+    }
+    out.appendChild(el("p", "color:#e5484d", `Couldn't start: ${e.message}`));
+    return false;
+  }
 }
 
 function toast(severity, summary, detail) {
@@ -371,43 +431,34 @@ function drawPreview(out, preview, recipe) {
   }
 
   out.appendChild(el("p", S.sub + ";margin-top:8px;font-size:12px",
-    "Then it is uploaded to your Renest drive. You approve each upload once, in your browser."));
+    "Save it to your Renest drive (needs a subscription; you approve each upload once, " +
+    "in your browser), or keep it on this machine only, free."));
 
-  const nameWrap = el("div", "display:flex;gap:8px;margin-top:10px;align-items:center");
   const nameInput = el("input",
-    "flex:1;padding:8px 10px;font-size:13px;border:1px solid #555;border-radius:6px;" +
-    "background:transparent;color:inherit");
+    "width:100%;box-sizing:border-box;margin-top:10px;padding:8px 10px;font-size:13px;" +
+    "border:1px solid #555;border-radius:6px;background:transparent;color:inherit");
   nameInput.value = withLocalDate(preview.default_name) || "my-run";
-  const go = el("button", S.pri, "Confirm & nest");
-  nameWrap.appendChild(nameInput);
-  nameWrap.appendChild(go);
-  out.appendChild(nameWrap);
+  out.appendChild(nameInput);
+  const buttons = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px");
+  const toDrive = el("button", S.pri, "Save to my Renest drive");
+  const toLocal = el("button", S.sec, "Save on this machine only");
+  buttons.append(toDrive, toLocal);
+  out.appendChild(buttons);
 
-  go.onclick = async () => {
-    go.disabled = true;
-    go.textContent = "Starting…";
-    try {
-      // The preview was of the canvas as it was then. Switching tabs or editing since
-      // would otherwise nest the old graph under a list that no longer matches it.
-      const now = await app.graphToPrompt();
-      if (graphKey(now.output) !== graphKey(recipe.workflow)) {
-        out.replaceChildren(el("p", "opacity:.75",
-          "The canvas changed after this preview. Press \"Nest this run\" again to preview what is there now."));
-        return;
-      }
-      const body = { ...recipe, name: nameInput.value.trim() || undefined };
-      const res = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
-      followJob(out, res.job_id);
-    } catch (e) {
-      if (e.errorClass === "NOT_SIGNED_IN") {
-        drawSignIn(out, e.message);
-        return;
-      }
-      out.appendChild(el("p", "color:#e5484d", `Couldn't start: ${e.message}`));
-      go.disabled = false;
-      go.textContent = "Confirm & nest";
+  const ctx = { outDir: preview.out_dir };
+  const go = async (btn, destination) => {
+    const label = btn.textContent;
+    toDrive.disabled = toLocal.disabled = true;
+    btn.textContent = "Starting…";
+    const started = await startPack(out, recipe, nameInput.value.trim() || undefined,
+      destination, ctx);
+    if (!started && btn.isConnected) {
+      toDrive.disabled = toLocal.disabled = false;
+      btn.textContent = label;
     }
   };
+  toDrive.onclick = () => go(toDrive, "drive");
+  toLocal.onclick = () => go(toLocal, "local");
 }
 
 // Turn the engine's NDJSON log tail into plain sentences. Anything we don't
@@ -425,7 +476,8 @@ function humanLog(lines) {
   return out.slice(-4).join("\n");
 }
 
-function followJob(out, jobId) {
+function followJob(out, jobId, ctx = {}) {
+  const local = ctx.destination === "local";
   out.replaceChildren();
   const head = el("div", "font-weight:600", "Packing…");
   const stageLine = el("div", S.sub, "queued");
@@ -491,7 +543,23 @@ function followJob(out, jobId) {
       cancel.remove();
       waiting.remove();
       bar.style.display = "";
-      if (job.state === "succeeded") {
+      if (job.state === "succeeded" && local) {
+        fill.style.width = "100%";
+        head.textContent = "✓ Saved on this machine only";
+        const result = job.result || {};
+        const where = result.manifest_path
+          ? result.manifest_path.replace(/\/manifest\.json$/, "")
+          : (ctx.outDir || "the folder shown in the preview");
+        // Honest about what "on this machine" means on a rented one: nothing here
+        // outlives the machine unless the person copies it off.
+        stageLine.textContent = `Saved on this machine only, at ${where}. It is gone when ` +
+          "this machine is. To keep it, copy that folder off the machine — or save it to " +
+          "your Renest drive.";
+        stageLine.style.overflowWrap = "anywhere";
+        out.insertBefore(linkOut(LOCAL_NEST_DOCS_URL, "How to keep or move a nest"), log);
+        log.remove();
+        toast("success", "Saved on this machine only", "Copy its folder off this machine to keep it.");
+      } else if (job.state === "succeeded") {
         fill.style.width = "100%";
         head.textContent = "✓ Saved to your Renest drive";
         const result = job.result || {};
@@ -513,14 +581,32 @@ function followJob(out, jobId) {
         toast("success", "Saved to your Renest drive", "Files and dependencies checked and uploaded.");
       } else if ((job.error || {}).error_class === "NOT_SIGNED_IN") {
         clearInterval(pollTimer);
-        drawSignIn(out, job.error.human);
+        drawSignIn(out, job.error.human, ctx);
       } else {
-        head.textContent = job.state === "failed" ? "✗ Packing failed" : `Stopped (${job.state})`;
         const err = job.error || {};
+        const refused = job.state === "failed" && DRIVE_REFUSALS.has(err.error_class);
+        head.textContent = refused ? "Your Renest drive did not take this nest"
+          : job.state === "failed" ? "✗ Packing failed" : `Stopped (${job.state})`;
         stageLine.textContent = err.human || err.detail || (job.state === "cancelled"
-          ? "Cancelled. Nothing from this run was saved to your drive."
+          ? (local ? "Cancelled. Nothing from this run was saved."
+            : "Cancelled. Nothing from this run was saved to your drive.")
           : "See the log below.");
-        if (job.state === "failed") toast("error", "Packing failed", stageLine.textContent);
+        // The service's ways forward (see plans, make room), then the free way out.
+        const extra = el("div", "");
+        drawActions(extra, err.actions);
+        if (refused && !local && ctx.recipe) extra.appendChild(localInsteadBtn(out, ctx));
+        if (extra.childNodes.length) out.insertBefore(extra, log);
+        // An empty or half-filled bar under "did not take this nest" reads as work still
+        // going on. Only a finished save keeps it.
+        bar.remove();
+        // A cancelled run's last log line is whatever it was doing when stopped ("Waiting
+        // for you to approve…"), which reads as if it still is. Failures keep theirs: there
+        // the log is the explanation. A refusal is explained by the service's own sentence,
+        // and its log ends on "waiting for approval", so it goes too.
+        if (job.state === "cancelled") log.remove();
+        else if (refused) log.remove();
+        if (job.state === "failed") toast("error", refused ? "Not saved to your drive" : "Packing failed",
+          stageLine.textContent);
       }
     }
   }, 1000);

@@ -7,8 +7,10 @@ Renest saves a ComfyUI or fine-tuning setup that already worked on a rented GPU 
 This is the official [Renest](https://renest.ai) panel for ComfyUI. The moment a run
 succeeds, **Nest this run** saves everything that run depended on — models, custom nodes,
 dependency versions, the workflow itself — into a single open-format archive (a "nest")
-on this machine's disk, checks every file byte for byte, and uploads it to your Renest
-drive once you approve that upload in your browser. Restore it later on another
+on this machine's disk and checks every file byte for byte. Then you choose: **Save to my
+Renest drive** uploads it once you approve that upload in your browser (the drive needs a
+paid subscription), or **Save on this machine only** keeps it on this disk, free, with no
+account needed. Restore it later on another
 machine and those files and dependencies come back, checked again against the same
 fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
 
@@ -17,9 +19,14 @@ fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
 - A **Renest** tab in the ComfyUI sidebar.
 - After a successful run: **Nest this run** → a preview of exactly what will be
   saved (models / ComfyUI itself / custom nodes / dependency locks, with sizes),
-  anything that could not be captured, and where the nest will be written →
-  confirm → a short code to approve in your browser → live progress until it is
-  saved, verified and on your Renest drive.
+  anything that could not be captured, and where the nest will be written → one of
+  two buttons:
+  - **Save to my Renest drive** → a short code to approve in your browser → live
+    progress until it is saved, checked and on your Renest drive. The drive needs a
+    subscription; if your plan has none, or the drive is full, the panel says so, links
+    to the plans page, and offers **Save on this machine instead**.
+  - **Save on this machine only** → the same pack, kept on this disk. Free, no sign-in.
+    On a rented machine it is gone when the machine is, unless you copy the folder off.
 - If the Renest engine isn't installed yet, the tab shows the two commands that
   install it. Nothing else to configure.
 
@@ -46,7 +53,9 @@ renest login
 renest serve
 ```
 
-`renest login` signs this machine in to your Renest account: it prints a page and a
+`renest login` is only needed for the Renest drive (no account yet? create one at
+https://app.renest.ai/register). It signs this machine in to your Renest account: it
+prints a page and a
 code, you approve them in your browser, and the machine keeps a sign-in that can only
 *ask* for an upload. Every upload from the panel is then approved by you, once, in
 your own browser.
@@ -74,12 +83,14 @@ a restart — a home directory there often does not.
   the file the engine writes on that machine and adds it to each call it passes on.
 - **Only the calls the panel needs are passed on**: check the engine, preview and
   pack, follow and cancel that job. Which folder gets packed and where the nest is
-  written are decided on the machine, never by what the browser sends. Anyone who
+  written are decided on the machine, never by what the browser sends; the browser
+  only picks the workflow, its name, and drive or this machine. Anyone who
   can open your ComfyUI can use the panel too, so keep that address to yourself.
 - **No cloud credentials pass through here.** Bucket keys and account tokens are
   the engine's business; this panel never sees, stores or forwards them.
 - **Nothing is uploaded without your approval.** A nest is written to your own disk
-  first. Each upload to your Renest drive asks for your approval in your own browser,
+  first, and **Save on this machine only** uploads nothing. Each upload to your Renest
+  drive asks for your approval in your own browser,
   from the account this machine was signed in to; the permission it gets covers that
   one upload only and is withdrawn when it ends. The machine keeps nothing that can
   upload by itself.

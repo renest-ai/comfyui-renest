@@ -4,15 +4,25 @@
 [project]
 name = "comfyui-renest"
 description = "Official Renest panel: save a ComfyUI run that worked - models, custom nodes, exact package versions, workflow - and bring it back on another Linux GPU machine, every file checked against its SHA-256."
-version = "0.1.10"
+version = "0.1.11"
 license = { file = "LICENSE" }
 dependencies = []
+# What the Registry shows as supported. Both ends of a move are Linux + NVIDIA
+# (the README's "where it works" section); Windows and macOS are deliberately absent.
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
 
 [project.urls]
 Repository = "https://github.com/renest-ai/comfyui-renest"
 Homepage = "https://renest.ai"
+Documentation = "https://renest.ai/docs/plugin-nest-this-run"
+"Bug Tracker" = "https://github.com/renest-ai/comfyui-renest/issues"
 
 [tool.comfy]
 PublisherId = "renest"
 DisplayName = "Renest"
-Icon = ""
+# The Registry takes these as addresses, not files in this repository.
+Icon = "https://renest.ai/favicon.svg"
+Banner = "https://renest.ai/assets/comfyui-registry-banner.jpg"

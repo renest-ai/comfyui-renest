@@ -411,7 +411,8 @@ def _pack_request(raw: bytes) -> bytes | None:
     can open this ComfyUI could pack any folder on the machine, or write anywhere.
     So only the workflow, the name and "preview or real" come from the browser, and
     the folders come from ``_env_facts`` — the same values the panel used to send,
-    read here instead. ``upload`` is always on, set here.
+    read here instead. ``upload`` is set here too, from the one choice the browser
+    does get: ``destination``, ``"drive"`` (the default) or ``"local"``.
     """
     try:
         sent = json.loads(raw or b"{}")
@@ -420,11 +421,12 @@ def _pack_request(raw: bytes) -> bytes | None:
     if not isinstance(sent, dict):
         return None
     body = {k: sent[k] for k in _PACK_FROM_BROWSER if k in sent}
-    # The panel path always goes to the Renest drive, and every upload is approved
-    # once in the person's own browser (the engine asks for that approval). Set here,
-    # never taken from the browser: whoever can open this ComfyUI does not get to
-    # decide what kind of job the engine runs.
-    body["upload"] = True
+    # Where the nest goes is the person's choice: their Renest drive (every upload is
+    # approved once in their own browser -- the engine asks for that approval), or this
+    # machine's disk only. Only the exact word "local" keeps it here; anything else,
+    # or nothing, means the drive. ``upload`` itself is never taken from the browser:
+    # the engine's flag is set here, from that one word, and the word is not passed on.
+    body["upload"] = sent.get("destination") != "local"
     facts = _env_facts()
     body["target"] = facts["base_path"]
     if facts.get("python"):
