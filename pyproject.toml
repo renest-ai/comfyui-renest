@@ -4,7 +4,7 @@
 [project]
 name = "comfyui-renest"
 description = "Official Renest panel: save a ComfyUI run that worked - models, custom nodes, exact package versions, workflow - and bring it back on another Linux GPU machine, every file checked against its SHA-256."
-version = "0.1.11"
+version = "0.1.12"
 license = { file = "LICENSE" }
 dependencies = []
 # What the Registry shows as supported. Both ends of a move are Linux + NVIDIA

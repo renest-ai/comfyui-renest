@@ -50,20 +50,49 @@ const graphKey = (output) => JSON.stringify(output);
 // ---------------------------------------------------------------- helpers --
 const BRIDGE = "/renest/api";
 
-/** Where the engine stands: "ready", "engine_unreachable", "token_missing", or
- * "panel_backend_missing" (this file loaded but its Python half did not). */
-async function engineState() {
+/** Where the engine stands: "ready", "engine_unreachable", "token_missing",
+ * "panel_backend_missing" (this file loaded but its Python half did not), or "no_answer".
+ *
+ * "no_answer" is not a verdict. Only the bridge saying so means the engine is not running;
+ * a call that timed out, dropped, or came back as somebody else's error page (a provider's
+ * proxy, say) only means this check did not get through. Calling that "not installed" sent
+ * people off to reinstall an engine that was running: seen 2026-10-19 on a rented machine,
+ * where the check made the moment a run finished did not answer within 5 s and the panel
+ * swapped "That run worked" for the install guide, twice. So: ask again, waiting longer
+ * each time, and say "couldn't reach" rather than "not installed" if it still fails. */
+const PROBE_WAITS_MS = [5000, 10000, 15000];
+const PROBE_PAUSE_MS = 1500;
+let engineSeenReady = false;
+
+async function probeOnce(ms) {
   let r;
   try {
-    r = await api.fetchApi(`${BRIDGE}/health`, { signal: AbortSignal.timeout(5000) });
+    r = await api.fetchApi(`${BRIDGE}/health`, { signal: AbortSignal.timeout(ms) });
   } catch {
-    return "engine_unreachable";
+    return "no_answer";
   }
   if (r.ok) return "ready";
   let body = {};
   try { body = await r.json(); } catch { /* not ours */ }
   if (body.renest_bridge_error) return body.renest_bridge_error;
-  return r.status === 404 ? "panel_backend_missing" : "engine_unreachable";
+  return r.status === 404 ? "panel_backend_missing" : "no_answer";
+}
+
+async function engineState(onRetry) {
+  for (let i = 0; i < PROBE_WAITS_MS.length; i++) {
+    if (i > 0) {
+      if (onRetry) onRetry(i);
+      // A drop or a proxy's instant error page fails in milliseconds; without a pause all
+      // three tries would be spent before a brief interruption has had time to pass.
+      await new Promise((resolve) => setTimeout(resolve, PROBE_PAUSE_MS));
+    }
+    const state = await probeOnce(PROBE_WAITS_MS[i]);
+    if (state !== "no_answer") {
+      if (state === "ready") engineSeenReady = true;
+      return state;
+    }
+  }
+  return "no_answer";
 }
 
 async function serveFetch(path, opts = {}) {
@@ -286,7 +315,19 @@ async function drawInto(root) {
   const status = el("p", S.sub, "Checking the local Renest engine…");
   root.appendChild(status);
 
-  const state = await engineState();
+  const state = await engineState(() => {
+    status.textContent = "Still checking the local Renest engine — it is taking longer than usual…";
+  });
+  if (state === "no_answer") {
+    // Not "isn't installed": nothing said so. Most often a slow or busy link for a moment.
+    status.textContent = engineSeenReady
+      ? "Couldn't reach the Renest engine just now. It was answering a moment ago — this is usually a slow connection to this machine."
+      : "Couldn't reach the Renest engine through ComfyUI just now. This is usually a slow connection to this machine.";
+    const retry = el("button", S.sec, "Check again");
+    retry.onclick = render;
+    root.appendChild(retry);
+    return;
+  }
   if (state === "panel_backend_missing") {
     status.textContent = "Plugin backend missing — reinstall comfyui-renest and restart ComfyUI.";
     return;
