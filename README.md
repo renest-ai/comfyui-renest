@@ -30,6 +30,18 @@ fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
 - If the Renest engine isn't installed yet, the tab shows the two commands that
   install it. Nothing else to configure.
 
+## Nest this run / Take back
+
+**Nest this run** only takes the workflow that just ran to the end: what a nest is
+worth is what that run used, caught while it worked. A canvas that has not run, or has
+changed since its last run finished, gets "run it once first" instead. Once the drive has
+checked an upload, the panel lists the model files it now holds, so you can free the space
+yourself — Renest never deletes anything in your ComfyUI folder. **Take back** (approved
+once in your browser) lists your saved workflows, compares one with this machine — ComfyUI,
+Python, torch, custom nodes, files — and brings the missing files back, checked byte for
+byte. A file that is already here with different bytes is kept; ours lands beside it. It
+does not install custom nodes, and it does not promise the workflow will run.
+
 ## Install
 
 **Via ComfyUI-Manager**: search for "Renest", install, restart ComfyUI.
@@ -82,9 +94,11 @@ a restart — a home directory there often does not.
 - **The engine's token never reaches your browser.** The Python half reads it from
   the file the engine writes on that machine and adds it to each call it passes on.
 - **Only the calls the panel needs are passed on**: check the engine, preview and
-  pack, follow and cancel that job. Which folder gets packed and where the nest is
-  written are decided on the machine, never by what the browser sends; the browser
-  only picks the workflow, its name, and drive or this machine. Anyone who
+  pack, follow and cancel that job; for Take back, open a session you approve in your
+  browser, compare or fetch one saved workflow, and close the session. Which folder gets
+  packed, where the nest is written and where taken-back files land are decided on the
+  machine, never by what the browser sends; the browser only picks the workflow, its
+  name, and drive or this machine. Anyone who
   can open your ComfyUI can use the panel too, so keep that address to yourself.
 - **No cloud credentials pass through here.** Bucket keys and account tokens are
   the engine's business; this panel never sees, stores or forwards them.

@@ -34,6 +34,10 @@ const LOCAL_NEST_DOCS_URL = "https://renest.ai/docs/plugin-nest-this-run#where";
 // Refusals that mean "your drive will not take this" — a plan without cloud storage, or
 // a full drive. Packing on this machine stays free, so these offer that instead.
 const DRIVE_REFUSALS = new Set(["PLAN_CANNOT_PACK", "QUOTA_EXCEEDED"]);
+// The engine's own class for "the drive checked the nest and said no": the packing
+// worked, so the heading must not say "Packing failed". Not a service code, so it is
+// kept apart from DRIVE_REFUSALS (which the contract test checks against the server).
+const DRIVE_REJECTED = "DRIVE_REJECTED";
 
 let panelEl = null;
 let pollTimer = null;
@@ -46,6 +50,20 @@ let lastRunFlag = false; // a run succeeded since panel last rendered
 let lastGoodGraph = null;
 
 const graphKey = (output) => JSON.stringify(output);
+// The one save button, and the words every "press it again" sentence points back at.
+const SAVE_LABEL = "Nest this run";
+
+// Which half of the panel is showing: "save" or "takeback".
+let activeTab = "save";
+// Take back: the one session the engine holds for this panel (its id only — the
+// permission itself stays in the engine's memory), and the job running in it. A session
+// is closed when a take-back finishes, on Close, and whenever the panel is drawn afresh.
+const tb = { session: null, jobId: null, kind: null, timer: null };
+const TB_SESSION_ID = /^tb_[0-9a-f]{24}$/;
+const TERMINAL = ["succeeded", "failed", "cancelled", "interrupted"];
+const TAKEBACK_FINE_PRINT =
+  "We bring files back and check them. We don't install custom nodes, and we don't say " +
+  "whether the workflow will run.";
 
 // ---------------------------------------------------------------- helpers --
 const BRIDGE = "/renest/api";
@@ -245,7 +263,7 @@ function drawSignIn(out, message, ctx) {
   c.appendChild(copyBtn(LOGIN_CMD));
   box.appendChild(c);
   box.appendChild(el("p", S.sub + ";margin-top:8px",
-    "It shows a code to approve in your browser. Then press \"Nest this run\" again."));
+    `It shows a code to approve in your browser. Then press "${(ctx && ctx.again) || SAVE_LABEL}" again.`));
   const signUp = el("p", S.sub + ";margin-top:8px", "No Renest account yet? ");
   signUp.appendChild(linkOut(REGISTER_URL, "Create one"));
   box.appendChild(signUp);
@@ -263,7 +281,7 @@ async function startPack(out, recipe, name, destination, ctx) {
     const now = await app.graphToPrompt();
     if (graphKey(now.output) !== graphKey(recipe.workflow)) {
       out.replaceChildren(el("p", "opacity:.75",
-        "The canvas changed after this preview. Press \"Nest this run\" again to preview what is there now."));
+        `The canvas changed after this preview. Press "${job.again || SAVE_LABEL}" again to preview what is there now.`));
       return false;
     }
     const body = { ...recipe, name, destination };
@@ -304,14 +322,37 @@ const S = {
 
 function render() {
   if (!panelEl) return;
+  // Drawn afresh (opened, a tab switched, "Check again"): whatever take-back was showing
+  // is gone from the screen, so its session goes too.
+  endTakeback();
   panelEl.replaceChildren();
   const root = el("div", S.root);
   panelEl.appendChild(root);
   drawInto(root);
 }
 
+/** Two section headings, Save and Take back. Plain buttons: no framework in here. */
+function drawTabsInto() {
+  const bar = el("div", "display:flex;gap:4px;border-bottom:1px solid #444");
+  for (const [id, label] of [["save", "Save"], ["takeback", "Take back"]]) {
+    const on = activeTab === id;
+    const b = el("button",
+      "padding:6px 12px;font-size:13px;cursor:pointer;background:transparent;color:inherit;" +
+      "border:none;border-bottom:2px solid " + (on ? "#2E8B6E" : "transparent") +
+      ";font-weight:" + (on ? "700" : "400") + ";opacity:" + (on ? "1" : ".7"), label);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.onclick = () => {
+      if (activeTab === id) return;
+      activeTab = id;
+      render();
+    };
+    bar.appendChild(b);
+  }
+  return bar;
+}
+
 async function drawInto(root) {
-  root.appendChild(el("h3", S.h, "Renest — save this run"));
+  root.appendChild(el("h3", S.h, "Renest"));
   const status = el("p", S.sub, "Checking the local Renest engine…");
   root.appendChild(status);
 
@@ -360,14 +401,30 @@ async function drawInto(root) {
     return;
   }
 
+  root.insertBefore(drawTabsInto(), status);
+  if (activeTab === "takeback") {
+    status.remove();
+    drawTakeback(root);
+    return;
+  }
+
   status.textContent = lastRunFlag
     ? "That run worked — you can nest it now."
-    : "Engine ready. Run your workflow once; when it finishes, you can nest it.";
+    : "Engine ready. Run your workflow once; when it finishes, you can save it.";
 
-  const nestBtn = el("button", S.pri, "Nest this run");
+  // One way in (founder 2026-10-19): only a workflow that just ran to the end is saved.
+  // What a nest is worth is the environment facts caught at that run, not the files alone.
+  root.appendChild(el("div", "font-weight:600", SAVE_LABEL));
+  root.appendChild(el("p", S.sub + ";font-size:12px",
+    "Saves the workflow on the canvas with the models, custom nodes and locked dependencies " +
+    "behind the run that just finished, and takes it back into this ComfyUI later from the " +
+    "Take back tab."));
+  const nestBtn = el("button", S.pri, SAVE_LABEL);
   root.appendChild(nestBtn);
   const out = el("div", "");
   root.appendChild(out);
+  root.appendChild(el("p", S.sub + ";font-size:11px",
+    "Files are checked byte for byte. Taking them back later does not promise the workflow will run."));
 
   nestBtn.onclick = async () => {
     nestBtn.disabled = true;
@@ -377,7 +434,7 @@ async function drawInto(root) {
       const prompt = await app.graphToPrompt();
       if (!prompt.output || Object.keys(prompt.output).length === 0) {
         out.appendChild(el("p", "opacity:.75",
-          "The canvas is empty — load or build a workflow first. Renest saves runs that work; there's nothing to nest yet."));
+          "The canvas is empty — load or build a workflow first. Renest saves runs that work; there's nothing to save yet."));
         return;
       }
       if (graphKey(prompt.output) !== lastGoodGraph) {
@@ -394,17 +451,76 @@ async function drawInto(root) {
       // Which folder to pack is filled in on the machine, not here: see the bridge.
       const body = { ...recipe, dry_run: true };
       const preview = await serveFetch("/pack", { method: "POST", body: JSON.stringify(body) });
-      drawPreview(out, preview, recipe);
+      drawPreview(out, preview, recipe, {
+        again: SAVE_LABEL, cleanable: true, models: (preview.items || {}).models || [],
+      });
     } catch (e) {
       out.appendChild(el("p", "color:#e5484d", `Preview failed: ${e.message}`));
     } finally {
       nestBtn.disabled = false;
-      nestBtn.textContent = "Nest this run";
+      nestBtn.textContent = SAVE_LABEL;
     }
   };
 }
 
-function drawPreview(out, preview, recipe) {
+/** A list that shows its first few rows and opens the rest on a click — "… and 3 more"
+ * that cannot be opened hides exactly the lines someone was looking for. */
+function rowsWithMore(parent, rows, limit = 6) {
+  rows.slice(0, limit).forEach((r) => parent.appendChild(r));
+  if (rows.length <= limit) return;
+  const more = el("button",
+    "align-self:flex-start;padding:0;margin-top:2px;font-size:11px;cursor:pointer;border:none;" +
+    "background:transparent;color:#4cc38a;text-decoration:underline", `Show ${rows.length - limit} more`);
+  more.onclick = () => {
+    rows.slice(limit).forEach((r) => parent.insertBefore(r, more));
+    more.remove();
+  };
+  parent.appendChild(more);
+}
+
+/** A path that wraps after a slash rather than mid-name, and copies as typed. */
+function pathNode(path, style) {
+  const span = el("span", style);
+  String(path).split("/").forEach((part, i, all) => {
+    span.appendChild(document.createTextNode(part + (i < all.length - 1 ? "/" : "")));
+    if (i < all.length - 1) span.appendChild(document.createElement("wbr"));
+  });
+  return span;
+}
+
+/** One "label … value" line; the value may wrap, the label never does. A null label
+ * leaves no indent (a line of its own rather than one under a heading). */
+function factRow(label, value, valueStyle = "") {
+  const row = el("div", "display:flex;gap:10px;padding:2px 0;align-items:baseline");
+  if (label !== null) row.appendChild(el("span", "flex:none;min-width:96px;opacity:.8", label));
+  row.appendChild(el("span", "min-width:0;overflow-wrap:anywhere;" + valueStyle, value));
+  return row;
+}
+
+/** The files a drive save has checked, offered for the person to clear themselves. */
+function cleanableBlock(models) {
+  const box = el("div", S.box + ";margin-top:8px;display:flex;flex-direction:column;gap:4px");
+  box.appendChild(el("p", "margin:0",
+    "These files are now on your drive, checked byte for byte. If you want the space back, " +
+    "you can delete them from this machine yourself — Take back brings them back later."));
+  const rows = models.map((m) => {
+    const size = m.size_bytes ?? m.approx_bytes;
+    const row = el("div", "display:flex;gap:10px;padding:2px 0;align-items:baseline;" +
+      "font-family:monospace;font-size:11px;opacity:.85");
+    row.append(pathNode(m.path || m.name || "?", "min-width:0;flex:1;overflow-wrap:anywhere"),
+      el("span", "flex:none", size ? fmtBytes(size) : ""));
+    return row;
+  });
+  rowsWithMore(box, rows);
+  const total = models.reduce((n, m) => n + (Number(m.size_bytes ?? m.approx_bytes) || 0), 0);
+  box.appendChild(el("div", "font-size:11px;opacity:.6",
+    `${models.length} file${models.length === 1 ? "" : "s"} · ${fmtBytes(total)}`));
+  box.appendChild(el("p", S.sub + ";font-size:11px;margin-top:4px",
+    "Workflows you haven't saved are not checked. Renest never deletes files here."));
+  return box;
+}
+
+function drawPreview(out, preview, recipe, opts = {}) {
   out.replaceChildren();
   const box = el("div", S.box);
   box.appendChild(el("div", "font-weight:600;margin-bottom:6px", "What goes in the nest"));
@@ -486,7 +602,7 @@ function drawPreview(out, preview, recipe) {
   buttons.append(toDrive, toLocal);
   out.appendChild(buttons);
 
-  const ctx = { outDir: preview.out_dir };
+  const ctx = { ...opts, outDir: preview.out_dir };
   const go = async (btn, destination) => {
     const label = btn.textContent;
     toDrive.disabled = toLocal.disabled = true;
@@ -505,7 +621,7 @@ function drawPreview(out, preview, recipe) {
 // Turn the engine's NDJSON log tail into plain sentences. Anything we don't
 // recognise is dropped rather than dumped: a user watching a 20 GB copy should
 // see what is happening, not our wire format.
-function humanLog(lines) {
+function humanLog(lines, withInfo = false) {
   const out = [];
   for (const raw of lines.slice(-20)) {
     let e;
@@ -513,19 +629,50 @@ function humanLog(lines) {
     if (e.type === "stage_start" && e.desc) out.push(e.desc);
     else if (e.type === "warning" && (e.human || e.message)) out.push(e.human || e.message);
     else if (e.type === "stage_end" && e.desc) out.push(`${e.desc} — done`);
+    else if (withInfo && e.type === "info" && e.human) out.push(e.human);
   }
   return out.slice(-4).join("\n");
 }
 
+/** The short code to approve in the browser — the same box for an upload and a take-back. */
+function drawApproval(waiting, approval, heading) {
+  waiting.replaceChildren();
+  waiting.appendChild(el("div", "font-weight:600", heading));
+  waiting.appendChild(el("div", S.sub + ";margin-top:4px",
+    "Check that the approval page shows this code:"));
+  waiting.appendChild(el("div",
+    "font-family:monospace;font-size:20px;font-weight:700;letter-spacing:2px;margin:6px 0",
+    approval.user_code || "?"));
+  const href = safeHttpUrl(approval.verify_url);
+  if (href) waiting.appendChild(linkOut(href, "Open approval page"));
+  waiting.appendChild(el("p", S.sub + ";margin-top:8px",
+    "Waiting for you to approve in your browser…"));
+  waiting.style.display = "";
+}
+
+/** The engine's four packing stages, as a person would name them (serve-api.md §4.1). */
+const PACK_STAGES = {
+  P1: "Reading and copying what the run used",
+  P2: "Writing the manifest",
+  P3: "Uploading",
+  P4: "Checking with the drive",
+};
+
 function followJob(out, jobId, ctx = {}) {
   const local = ctx.destination === "local";
   out.replaceChildren();
-  const head = el("div", "font-weight:600", "Packing…");
-  const stageLine = el("div", S.sub, "queued");
+  // "Packing…" for a nest kept here; "Saving…" when it is going to the drive, so the
+  // heading and the "Uploading" stage line read as one thing, not two.
+  const busyHead = local ? "Packing…" : "Saving to your Renest drive…";
+  const head = el("div", "font-weight:600", busyHead);
+  const stageLine = el("div", S.sub, "Waiting to start");
   const bar = el("div", "height:6px;border-radius:3px;background:#333;overflow:hidden;margin:8px 0");
   const fill = el("div", "height:100%;width:0%;background:#2E8B6E;transition:width .4s");
   bar.appendChild(fill);
   const log = el("div", S.log, "");
+  // An empty log box reads as a blank square above Cancel (founder's real run,
+  // 2026-10-19): it only shows once there is a sentence in it.
+  log.style.display = "none";
   const cancel = el("button", S.sec, "Cancel");
   // Shown while the engine waits for the upload to be approved in the browser.
   const waiting = el("div", S.box);
@@ -536,18 +683,7 @@ function followJob(out, jobId, ctx = {}) {
   function showApproval(approval) {
     if (shownCode === approval.user_code) return;
     shownCode = approval.user_code;
-    waiting.replaceChildren();
-    waiting.appendChild(el("div", "font-weight:600", "Approve this upload"));
-    waiting.appendChild(el("div", S.sub + ";margin-top:4px",
-      "Check that the approval page shows this code:"));
-    waiting.appendChild(el("div",
-      "font-family:monospace;font-size:20px;font-weight:700;letter-spacing:2px;margin:6px 0",
-      approval.user_code || "?"));
-    const href = safeHttpUrl(approval.verify_url);
-    if (href) waiting.appendChild(linkOut(href, "Open approval page"));
-    waiting.appendChild(el("p", S.sub + ";margin-top:8px",
-      "Waiting for you to approve in your browser…"));
-    waiting.style.display = "";
+    drawApproval(waiting, approval, "Approve this upload");
   }
 
   cancel.onclick = async () => {
@@ -562,6 +698,7 @@ function followJob(out, jobId, ctx = {}) {
     if (job.approval && job.state === "running") {
       head.textContent = "Waiting for approval";
       bar.style.display = "none";
+      log.style.display = "none";
       stageLine.textContent = "";
       showApproval(job.approval);
       return;
@@ -569,16 +706,19 @@ function followJob(out, jobId, ctx = {}) {
     if (shownCode !== null) {
       waiting.style.display = "none";
       bar.style.display = "";
-      head.textContent = "Packing…";
+      head.textContent = busyHead;
     }
     const p = job.progress || {};
-    stageLine.textContent = `${job.state}${job.stage ? ` · stage ${job.stage}` : ""}` +
+    // The stage in words, never its internal code ("stage P1" meant nothing to anyone).
+    stageLine.textContent = (job.state === "queued" ? "Waiting to start"
+      : PACK_STAGES[job.stage] || "Working…") +
       (p.speed_mbps ? ` · ${p.speed_mbps.toFixed(0)} Mbps` : "");
     if (p.percent != null) fill.style.width = `${Math.round(p.percent)}%`;
     // The engine's log is machine-readable NDJSON. Printing it raw put lines like
     // {"type":"progress","bytes_total":797842085288} on screen (seen on a real run,
     // 2026-08-15) — so keep the last few and show only the sentence inside each.
     if (Array.isArray(job.logs_tail)) log.textContent = humanLog(job.logs_tail);
+    log.style.display = log.textContent ? "" : "none";
     if (["succeeded", "failed", "cancelled", "interrupted"].includes(job.state)) {
       clearInterval(pollTimer);
       cancel.remove();
@@ -600,6 +740,18 @@ function followJob(out, jobId, ctx = {}) {
         out.insertBefore(linkOut(LOCAL_NEST_DOCS_URL, "How to keep or move a nest"), log);
         log.remove();
         toast("success", "Saved on this machine only", "Copy its folder off this machine to keep it.");
+      } else if (job.state === "succeeded" && ((job.result || {}).drive || {}).verdict === "pending") {
+        // Every byte is up; the drive's own check outran the engine's wait. Not a
+        // failure and not yet "verified": said plainly, with a link to watch it.
+        fill.style.width = "100%";
+        head.textContent = "Uploaded — still being checked on your drive";
+        const drive = (job.result || {}).drive || {};
+        stageLine.textContent = "Every file is on your drive. It shows as verified there once the check " +
+          "finishes. Do not upload it again.";
+        const href = safeHttpUrl(drive.console_url);
+        if (href) out.insertBefore(linkOut(href, "Open it on your Renest drive"), log);
+        log.remove();
+        toast("info", "Uploaded, still being checked", "It will show as verified in your drive.");
       } else if (job.state === "succeeded") {
         fill.style.width = "100%";
         head.textContent = "✓ Saved to your Renest drive";
@@ -615,6 +767,25 @@ function followJob(out, jobId, ctx = {}) {
             where.replace(/\/manifest\.json$/, ""));
           out.insertBefore(p, log);
         }
+        // "Nest this run": once the service has checked the upload (a drive result
+        // is there), say which files are now safe to clear — the person clears them.
+        // Prefer what the engine read off the checked nest (absolute paths on this machine);
+        // the preview's model table is the fallback for an engine that does not send it.
+        const engineList = result.local_copy && Array.isArray(result.local_copy.cleanable_files)
+          ? result.local_copy.cleanable_files : null;
+        const toClear = engineList && engineList.length ? engineList : ctx.models;
+        if (ctx.cleanable && result.drive && Array.isArray(toClear) && toClear.length) {
+          out.insertBefore(cleanableBlock(toClear), log);
+        }
+        // Earlier saves the drive had not finished checking keep their copies beside
+        // ComfyUI until a take-back sees them checked: said here, so they are never silent.
+        const pendingEarlier = Number((result.local_copy || {}).pending_earlier) || 0;
+        if (pendingEarlier) {
+          out.insertBefore(el("p", S.sub + ";font-size:11px;margin-top:4px",
+            `${pendingEarlier} earlier save${pendingEarlier === 1 ? " was" : "s were"} still being ` +
+            "checked by your drive; the copies kept beside ComfyUI stay until a take-back " +
+            "confirms them."), log);
+        }
         // Drop the running trace only after the path is in — it is inserted relative
         // to this element, so removing it first threw and took the path (and the
         // toast) down with it. Caught by looking at the screenshot, not by a test.
@@ -625,7 +796,8 @@ function followJob(out, jobId, ctx = {}) {
         drawSignIn(out, job.error.human, ctx);
       } else {
         const err = job.error || {};
-        const refused = job.state === "failed" && DRIVE_REFUSALS.has(err.error_class);
+        const refused = job.state === "failed"
+          && (DRIVE_REFUSALS.has(err.error_class) || err.error_class === DRIVE_REJECTED);
         head.textContent = refused ? "Your Renest drive did not take this nest"
           : job.state === "failed" ? "✗ Packing failed" : `Stopped (${job.state})`;
         stageLine.textContent = err.human || err.detail || (job.state === "cancelled"
@@ -653,6 +825,394 @@ function followJob(out, jobId, ctx = {}) {
   }, 1000);
 }
 
+// -------------------------------------------------------------- take back --
+/** Close the take-back session at the engine, which revokes its permission at the
+ * service. Fire and forget: a session nobody closes runs out on its own. */
+function closeSession(keepalive = false) {
+  const id = tb.session;
+  tb.session = null;
+  if (!id || !TB_SESSION_ID.test(id)) return;
+  serveFetch(`/takeback/sessions/${id}`, { method: "DELETE", keepalive }).catch(() => {});
+}
+
+/** Whatever take-back the panel was showing is over. A fetch already bringing files back
+ * is left to finish: stopping it halfway helps nobody, and it closes its own session. */
+function endTakeback(keepalive = false) {
+  if (tb.kind === "fetch" && tb.jobId) return;
+  if (tb.kind === "session" && tb.jobId) {
+    // Still waiting for the approval: withdraw it, so the code stops working.
+    serveFetch(`/jobs/${tb.jobId}`, { method: "DELETE", keepalive }).catch(() => {});
+  }
+  clearInterval(tb.timer);
+  tb.timer = null;
+  tb.jobId = null;
+  tb.kind = null;
+  closeSession(keepalive);
+}
+
+/** Follow one take-back job. Its own timer, so a save on the other tab is untouched. */
+function pollTakebackJob(jobId, kind, on) {
+  clearInterval(tb.timer);
+  tb.jobId = jobId;
+  tb.kind = kind;
+  let busy = false;
+  const timer = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      let job;
+      try { job = await serveFetch(`/jobs/${jobId}`); }
+      catch (e) { if (on.pollError) on.pollError(e); return; }
+      if (tb.jobId !== jobId) { clearInterval(timer); return; }
+      if (job.approval && job.state === "running") { if (on.approval) on.approval(job.approval); return; }
+      if (TERMINAL.includes(job.state)) {
+        clearInterval(timer);
+        tb.timer = null;
+        tb.jobId = null;
+        tb.kind = null;
+        on.done(job);
+        return;
+      }
+      if (on.progress) on.progress(job);
+    } finally {
+      busy = false;
+    }
+  }, 1000);
+  tb.timer = timer;
+}
+
+const SHOW_SAVED = "Show my saved workflows";
+
+function drawTakeback(root) {
+  root.appendChild(el("div", "font-weight:600", "Take back a workflow"));
+  root.appendChild(el("p", S.sub + ";font-size:12px",
+    "Brings a saved workflow and its files back into this ComfyUI, and says what changed " +
+    "on this machine since it was saved. You approve it once, in your browser."));
+  const out = el("div", "display:flex;flex-direction:column;gap:8px");
+  root.appendChild(out);
+  drawTakebackStart(out);
+}
+
+function drawTakebackStart(out) {
+  out.replaceChildren();
+  const show = el("button", S.pri + ";align-self:flex-start", SHOW_SAVED);
+  show.onclick = () => openTakeback(out);
+  out.appendChild(show);
+}
+
+/** A take-back that did not go through: the engine's sentence, the service's ways
+ * forward, and a way back to the start. */
+function drawTakebackError(out, title, err) {
+  out.replaceChildren();
+  out.appendChild(el("div", "font-weight:600", title));
+  out.appendChild(el("p", S.sub, (err && (err.human || err.detail)) ||
+    "The Renest engine did not say why."));
+  const extra = el("div", "");
+  drawActions(extra, err && err.actions);
+  if (extra.childNodes.length) out.appendChild(extra);
+  const again = el("button", S.sec + ";align-self:flex-start", "Start again");
+  again.onclick = () => { endTakeback(); drawTakebackStart(out); };
+  out.appendChild(again);
+}
+
+async function openTakeback(out) {
+  endTakeback();
+  out.replaceChildren(el("p", S.sub, "Asking the Renest engine…"));
+  let res;
+  try {
+    res = await serveFetch("/takeback/sessions", { method: "POST", body: "{}" });
+  } catch (e) {
+    if (e.errorClass === "NOT_SIGNED_IN") {
+      drawSignIn(out, e.message, { again: SHOW_SAVED });
+      return;
+    }
+    drawTakebackError(out, "Couldn't start", { human: e.message });
+    return;
+  }
+  const head = el("div", "font-weight:600", "Opening your saved workflows…");
+  const waiting = el("div", S.box);
+  waiting.style.display = "none";
+  const line = el("div", S.sub, "");
+  const cancel = el("button", S.sec + ";align-self:flex-start", "Cancel");
+  out.replaceChildren(head, waiting, line, cancel);
+  let shownCode = null;
+  cancel.onclick = async () => {
+    try { await serveFetch(`/jobs/${res.job_id}`, { method: "DELETE" }); } catch { /* already done */ }
+  };
+  pollTakebackJob(res.job_id, "session", {
+    approval(approval) {
+      head.textContent = "Waiting for approval";
+      line.textContent = "";
+      if (shownCode === approval.user_code) return;
+      shownCode = approval.user_code;
+      drawApproval(waiting, approval, "Approve this take-back");
+    },
+    pollError(e) { line.textContent = `Couldn't check on it just now: ${e.message}`; },
+    progress() {
+      if (shownCode !== null) {
+        waiting.style.display = "none";
+        head.textContent = "Approved — listing your saved workflows…";
+      }
+    },
+    done(job) {
+      const result = job.result || {};
+      if (job.state === "succeeded" && TB_SESSION_ID.test(String(result.session_id || ""))) {
+        tb.session = result.session_id;
+        if (out.isConnected) drawNestList(out, Array.isArray(result.nests) ? result.nests : []);
+        else closeSession();
+        return;
+      }
+      if (!out.isConnected) return;
+      const err = job.error || {};
+      if (err.error_class === "NOT_SIGNED_IN") {
+        drawSignIn(out, err.human, { again: SHOW_SAVED });
+        return;
+      }
+      if (job.state === "cancelled") {
+        drawTakebackError(out, "Stopped", { human: "Cancelled. Nothing was listed or fetched." });
+        return;
+      }
+      drawTakebackError(out, "Couldn't list your saved workflows", err);
+    },
+  });
+}
+
+function closeBtn(out, label = "Close") {
+  const b = el("button", S.sec + ";align-self:flex-start", label);
+  b.onclick = () => { endTakeback(); drawTakebackStart(out); };
+  return b;
+}
+
+function drawNestList(out, nests) {
+  out.replaceChildren();
+  out.appendChild(el("div", "font-weight:600", "Your saved workflows"));
+  if (!nests.length) {
+    out.appendChild(el("p", S.sub, "Your Renest drive has no saved workflows yet."));
+    out.appendChild(closeBtn(out));
+    return;
+  }
+  const box = el("div", S.box + ";display:flex;flex-direction:column");
+  const rows = nests.map((n) => {
+    const row = el("div", "display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;" +
+      "padding:6px 0;border-bottom:1px solid #333");
+    row.appendChild(el("span", "flex:1 1 140px;min-width:0;overflow-wrap:anywhere;font-weight:600",
+      n.name || "(no name)"));
+    const tag = n.ran === true ? "ran to completion" : n.ran === false ? "not run" : null;
+    if (tag) row.appendChild(el("span", "font-size:11px;opacity:.75;flex:none", tag));
+    row.appendChild(el("span", "font-family:monospace;font-size:11px;opacity:.75;flex:none",
+      fmtBytes(n.size_bytes)));
+    const cmp = el("button", S.sec + ";padding:4px 10px;font-size:12px;flex:none",
+      "Compare with this machine");
+    if (!n.head_version_id) {
+      cmp.disabled = true;
+      cmp.title = "This saved workflow has no finished version to take back.";
+    }
+    cmp.onclick = () => runTakeback(out, n, "compare");
+    row.appendChild(cmp);
+    return row;
+  });
+  rowsWithMore(box, rows, 10);
+  out.appendChild(box);
+  out.appendChild(closeBtn(out));
+}
+
+async function runTakeback(out, nest, mode) {
+  const fetching = mode === "fetch";
+  out.replaceChildren();
+  const head = el("div", "font-weight:600", fetching
+    ? `Bringing back the files of ${nest.name || "this workflow"}…`
+    : `Comparing ${nest.name || "this workflow"} with this machine…`);
+  const line = el("div", S.sub, "");
+  const bar = el("div", "height:6px;border-radius:3px;background:#333;overflow:hidden;margin:4px 0");
+  const fill = el("div", "height:100%;width:0%;background:#2E8B6E;transition:width .4s");
+  bar.appendChild(fill);
+  const log = el("div", S.log, "");
+  out.append(head, line);
+  if (fetching) out.append(bar, log);
+  if (!tb.session) {
+    drawTakebackError(out, "This take-back has ended", {
+      human: `Press "${SHOW_SAVED}" to approve a new one.` });
+    return;
+  }
+  let res;
+  try {
+    res = await serveFetch("/takeback", { method: "POST", body: JSON.stringify({
+      session_id: tb.session, nest_version_id: nest.head_version_id, mode }) });
+  } catch (e) {
+    drawTakebackError(out, "Couldn't start", { human: e.message });
+    return;
+  }
+  pollTakebackJob(res.job_id, mode, {
+    pollError(e) { line.textContent = `Couldn't check on it just now: ${e.message}`; },
+    progress(job) {
+      const p = job.progress || {};
+      if (p.percent != null) fill.style.width = `${Math.round(p.percent)}%`;
+      if (Array.isArray(job.logs_tail)) log.textContent = humanLog(job.logs_tail, true);
+    },
+    done(job) {
+      // Bringing files back is the end of a take-back: the session closes either way.
+      if (fetching) closeSession();
+      if (!out.isConnected) return;
+      const err = job.error || {};
+      if (err.error_class === "TAKEBACK_SESSION_GONE") tb.session = null;
+      if (job.state !== "succeeded") {
+        drawTakebackError(out, job.state === "cancelled" ? "Stopped"
+          : fetching ? "Couldn't bring the files back" : "Couldn't compare", err);
+        return;
+      }
+      const result = job.result || {};
+      if (fetching) drawFetched(out, nest, result);
+      else drawReport(out, nest, result);
+    },
+  });
+}
+
+const shortId = (v) => (typeof v === "string" && /^[0-9a-f]{12,}$/.test(v) ? v.slice(0, 10) : v);
+const bareHost = (u) => (typeof u === "string" ? u.replace(/^https?:\/\//, "").replace(/\.git$/, "") : "");
+
+/** then → now, in words: unchanged, was … · now …, or what was not recorded. */
+function thenNow(fact, show = (v) => String(v)) {
+  const f = fact || {};
+  const has = (v) => v !== null && v !== undefined && v !== "";
+  if (f.state === "unchanged") return `unchanged (${show(f.then)})`;
+  if (f.state === "changed") return `was ${show(f.then)} · now ${show(f.now)}`;
+  if (has(f.then)) return `was ${show(f.then)} · now could not be read`;
+  if (has(f.now)) return `now ${show(f.now)} · not recorded when it was saved`;
+  return "not recorded";
+}
+
+function describePack(side) {
+  if (!side) return "not installed";
+  const id = side.version || shortId(side.commit);
+  const where = bareHost(side.repo_url);
+  if (id && where) return `${id} (${where})`;
+  return id || where || "no version found";
+}
+
+/** "<path>: not handed out — get it yourself from <link>". The address is the file's
+ * own origin, recorded at packing; only a web page is ever made a link. */
+function withheldRow(path, originUrl, label = "") {
+  const row = factRow(label, "", "font-size:12px");
+  row.lastChild.appendChild(document.createTextNode(`${path}: not handed out — get it yourself from `));
+  const href = safeHttpUrl(originUrl);
+  row.lastChild.appendChild(href ? linkOut(href, href) : document.createTextNode("its source"));
+  return row;
+}
+
+function drawReport(out, nest, result) {
+  const rep = result.report || {};
+  out.replaceChildren();
+  out.appendChild(el("div", "font-weight:600", "What changed since it was saved"));
+  out.appendChild(el("div", S.sub + ";font-size:12px", nest.name || ""));
+  const box = el("div", S.box + ";display:flex;flex-direction:column;gap:2px");
+
+  box.appendChild(factRow("ComfyUI", thenNow(rep.comfyui, shortId)));
+  box.appendChild(factRow("Python", thenNow(rep.python)));
+  const pk = rep.packages || {};
+  if (pk.state === "unchanged") {
+    box.appendChild(factRow("Packages", "unchanged"));
+  } else if (pk.state === "changed") {
+    // torch and its family one line each; the rest as counts.
+    for (const c of pk.shown || []) box.appendChild(factRow(c.name, `was ${c.then} · now ${c.now}`));
+    const bits = [];
+    if (pk.other_changed) bits.push(`${pk.other_changed} other${pk.other_changed === 1 ? "" : "s"} at a different version`);
+    if (pk.added) bits.push(`${pk.added} added since`);
+    if (pk.removed) bits.push(`${pk.removed} no longer installed`);
+    if (bits.length) box.appendChild(factRow("Packages", bits.join(" · ")));
+  } else {
+    box.appendChild(factRow("Packages", `not compared${pk.why ? ` — ${pk.why}` : ""}`));
+  }
+  const gpu = rep.gpu || {};
+  if (gpu.then || gpu.now) box.appendChild(factRow("GPU", thenNow(gpu)));
+
+  // Custom nodes: how many of the ones it used are here, and a line for each that is not
+  // the same as then.
+  const packs = Array.isArray(rep.node_packs) ? rep.node_packs : [];
+  if (packs.length) {
+    const present = packs.filter((p) => p.state !== "missing").length;
+    box.appendChild(factRow("Custom nodes", `${present} of ${packs.length} present`));
+    const lines = packs.filter((p) => p.state === "missing" || p.state === "changed").map((p) =>
+      factRow("", `${p.dir}: was ${describePack(p.then)} · now ${p.state === "missing"
+        ? "not installed" : describePack(p.now)}`, "font-size:12px"));
+    rowsWithMore(box, lines);
+  } else {
+    box.appendChild(factRow("Custom nodes", "none recorded for this workflow"));
+  }
+
+  const files = Array.isArray(rep.files) ? rep.files : [];
+  const c = rep.counts || {};
+  const sum = [`${c.unchanged || 0} unchanged`, `${c.missing || 0} missing`,
+    `${c.different_here || 0} different here`];
+  if (c.withheld) sum.push(`${c.withheld} not handed out`);
+  box.appendChild(factRow("Files", sum.join(" · ")));
+  const fileLines = [];
+  for (const f of files) {
+    if (f.state === "missing") {
+      fileLines.push(factRow("", `${f.path}: missing — will be fetched (${fmtBytes(f.size_bytes)})`,
+        "font-size:12px"));
+    } else if (f.state === "different_here") {
+      fileLines.push(factRow("", `${f.path}: different bytes here — yours will be kept, ours lands beside it`,
+        "font-size:12px"));
+    } else if (f.state === "withheld") {
+      fileLines.push(withheldRow(f.path, f.origin_url));
+    } else if (f.state === "refused") {
+      fileLines.push(factRow("", `${f.path}: refused — ${f.why || "it would be placed where files get run as code"}`,
+        "font-size:12px;color:#e5484d"));
+    } else if (f.state === "sidebar_workflow") {
+      fileLines.push(factRow("", `${f.path}: the workflow — goes to your Workflows list`,
+        "font-size:12px"));
+    } else if (f.state === "not_placeable") {
+      fileLines.push(factRow("", `${f.path}: can't be placed inside this ComfyUI folder — left out`,
+        "font-size:12px"));
+    }
+  }
+  rowsWithMore(box, fileLines);
+  out.appendChild(box);
+
+  const buttons = el("div", "display:flex;flex-wrap:wrap;gap:8px");
+  const bring = el("button", S.pri, "Bring the missing files back");
+  bring.onclick = () => runTakeback(out, nest, "fetch");
+  buttons.append(bring, closeBtn(out));
+  out.appendChild(buttons);
+  out.appendChild(el("p", S.sub + ";font-size:11px", TAKEBACK_FINE_PRINT));
+}
+
+function drawFetched(out, nest, result) {
+  const o = result.outcome || {};
+  out.replaceChildren();
+  // The heading tells the truth about the count: nothing fetched and something failed
+  // is not "files back" (real-stack acceptance, 2026-10-19, offline fetch).
+  const failed = Number(o.failed) || 0;
+  const fetched = Number(o.fetched) || 0;
+  const head = failed && !fetched ? `✗ ${nest.name || "Workflow"}: couldn't bring the files back`
+    : failed ? `⚠ ${nest.name || "Workflow"}: some files back, ${failed} couldn't be fetched`
+    : `✓ ${nest.name || "Workflow"}: files back`;
+  out.appendChild(el("div", "font-weight:600", head));
+  let said = `Files back: ${o.fetched || 0} fetched, ${o.already_here || 0} already here, ` +
+    `${o.kept_yours || 0} kept yours (see .renest/kept).`;
+  said += o.sidebar_workflow ? " Workflow added to your Workflows list."
+    : " This save had no editor copy of the workflow, so nothing was added to your Workflows list.";
+  out.appendChild(el("p", "margin:0", said));
+  const box = el("div", "display:flex;flex-direction:column;gap:2px");
+  const lines = [];
+  for (const w of o.withheld_files || []) lines.push(withheldRow(w.path, w.origin_url, null));
+  for (const f of o.failed_files || []) {
+    lines.push(factRow(null, `${f.path}: couldn't be fetched (${f.why || "no reason given"})`,
+      "font-size:12px;color:#e5484d"));
+  }
+  rowsWithMore(box, lines);
+  if (lines.length) out.appendChild(box);
+  if (result.report_path) {
+    const where = el("div", "font-size:11px;opacity:.6", "The full report is at");
+    where.appendChild(el("div", "font-family:monospace;overflow-wrap:anywhere;opacity:.9",
+      result.report_path));
+    out.appendChild(where);
+  }
+  out.appendChild(el("p", S.sub + ";font-size:11px", TAKEBACK_FINE_PRINT));
+  out.appendChild(closeBtn(out, "Done"));
+  toast("success", "Files back", `${o.fetched || 0} fetched, checked byte for byte.`);
+}
+
 // -------------------------------------------------------------- extension --
 app.registerExtension({
   name: "renest.panel",
@@ -669,6 +1229,8 @@ app.registerExtension({
     } catch (e) {
       console.warn("[renest] sidebar API unavailable:", e);
     }
+    // Leaving the page ends a take-back too; keepalive lets the close go out as it unloads.
+    window.addEventListener("pagehide", () => endTakeback(true));
     // The moment a run succeeds is the moment worth saving — this tool only ever
     // reproduces runs that already worked, so that is exactly when to offer it.
     api.addEventListener("execution_success", async () => {
@@ -681,7 +1243,8 @@ app.registerExtension({
       // No "before the machine disappears" here: until the nest is in the cloud drive it
       // sits on this machine's own disk, and a warning that implies otherwise misleads.
       toast("info", "Run succeeded", "You can nest it from the Renest tab.");
-      if (panelEl) render();
+      // Not while a take-back is on screen: redrawing would throw away its list and report.
+      if (panelEl && activeTab === "save") render();
     });
   },
 });

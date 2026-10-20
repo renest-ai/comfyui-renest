@@ -112,7 +112,7 @@ def _env_facts() -> dict:
 
     These differ in the ComfyUI desktop app, which keeps data, program and Python
     environment in three separate places. Paths are not secrets; the access token
-    still travels only over ``/renest/token``.
+    never leaves this process (``/renest/info`` only says whether one exists).
     """
     facts: dict = {"base_path": str(Path.cwd()), "comfyui_dir": None, "python": sys.executable}
     try:
@@ -385,6 +385,7 @@ PREVIEW_TIMEOUT_S = 900.0
 QUICK_TIMEOUT_S = 15.0
 
 _JOB_PATH = re.compile(r"^jobs/job_[0-9a-f]{24}$")
+_TAKEBACK_SESSION_PATH = re.compile(r"^takeback/sessions/tb_[0-9a-f]{24}$")
 
 
 def _bridge_allows(method: str, tail: str) -> bool:
@@ -393,14 +394,26 @@ def _bridge_allows(method: str, tail: str) -> bool:
     Whoever can open this ComfyUI can call the bridge — on a rented machine that is
     anyone holding its address. So the list is what the panel needs, not what the
     engine offers: no restore (it installs software), no list of nests.
+
+    Take back (2026-10-19): opening a take-back session, taking one nest back, and
+    closing the session. Every one of these is gated by an approval the account's
+    owner gives in their own browser, so a stranger holding this ComfyUI's address
+    gets a code they cannot approve. The engine never installs anything on this path.
     """
-    if (method, tail) in (("GET", "health"), ("POST", "pack")):
+    if (method, tail) in (("GET", "health"), ("POST", "pack"),
+                          ("POST", "takeback/sessions"), ("POST", "takeback")):
+        return True
+    if method == "DELETE" and _TAKEBACK_SESSION_PATH.match(tail) is not None:
         return True
     return method in ("GET", "DELETE") and _JOB_PATH.match(tail) is not None
 
 
 #: The parts of a pack request the browser decides. Everything else is filled in here.
 _PACK_FROM_BROWSER = ("workflow", "workflow_ui", "name", "dry_run")
+#: The parts of a take-back request the browser decides: which session, which nest
+#: version, and whether to only compare or also fetch. The folders and the live node
+#: table come from this process.
+_TAKEBACK_FROM_BROWSER = ("session_id", "nest_version_id", "mode")
 
 
 def _pack_request(raw: bytes) -> bytes | None:
@@ -421,6 +434,14 @@ def _pack_request(raw: bytes) -> bytes | None:
     if not isinstance(sent, dict):
         return None
     body = {k: sent[k] for k in _PACK_FROM_BROWSER if k in sent}
+    # The workflow and the canvas travel **inline, as objects, or not at all**. The engine
+    # also accepts a workflow given as a path and reads that file off the machine; passed
+    # through from the browser that is a file probe for anyone holding this ComfyUI's
+    # address (independent security review, 2026-10-19). The panel only ever sends the
+    # canvas it holds, so nothing is lost by refusing strings here.
+    for key in ("workflow", "workflow_ui"):
+        if key in body and not isinstance(body[key], dict):
+            del body[key]
     # Where the nest goes is the person's choice: their Renest drive (every upload is
     # approved once in their own browser -- the engine asks for that approval), or this
     # machine's disk only. Only the exact word "local" keeps it here; anything else,
@@ -436,6 +457,31 @@ def _pack_request(raw: bytes) -> bytes | None:
     # target: the engine would also look for custom nodes and models under it.
     if facts.get("comfyui_dir") and facts["comfyui_dir"] != facts["base_path"]:
         body["program_dir"] = facts["comfyui_dir"]
+    return json.dumps(body).encode("utf-8")
+
+
+def _takeback_request(raw: bytes) -> bytes | None:
+    """Rebuild a take-back request from the browser's part and this machine's facts.
+
+    The browser says which session, which nest version and compare-or-fetch. Where the
+    files land is this ComfyUI's own folders, read here; and which node pack provides
+    each node type **right now** is something only this process knows, so it travels
+    with the request for the "what changed" report.
+    """
+    try:
+        sent = json.loads(raw or b"{}")
+    except ValueError:
+        return None
+    if not isinstance(sent, dict):
+        return None
+    body = {k: sent[k] for k in _TAKEBACK_FROM_BROWSER if k in sent}
+    facts = _env_facts()
+    body["target"] = facts["base_path"]
+    if facts.get("python"):
+        body["env_python"] = facts["python"]
+    if facts.get("comfyui_dir"):
+        body["comfyui_dir"] = facts["comfyui_dir"]
+    body["node_owners"] = _node_owners()
     return json.dumps(body).encode("utf-8")
 
 
@@ -491,7 +537,13 @@ def _register_routes() -> None:
             return _bridge_error("not_allowed", 404)
         body = None
         if method == "POST":
-            body = _pack_request(await request.read())
+            raw = await request.read()
+            if tail == "takeback":
+                body = _takeback_request(raw)
+            elif tail == "takeback/sessions":
+                body = b"{}"
+            else:
+                body = _pack_request(raw)
             if body is None:
                 return _bridge_error("bad_request", 400)
         # Read fresh on every call, so a new token needs no ComfyUI restart.
