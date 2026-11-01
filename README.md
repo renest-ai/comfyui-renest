@@ -8,8 +8,7 @@ This is the official [Renest](https://renest.ai) panel for ComfyUI. The moment a
 succeeds, **Nest this run** saves everything that run depended on — models, custom nodes,
 dependency versions, the workflow itself — into a single open-format archive (a "nest")
 on this machine's disk and checks every file byte for byte. Then you choose: **Save to my
-Renest drive** uploads it once you approve that upload in your browser (the drive needs a
-paid subscription), or **Save on this machine only** keeps it on this disk, free, with no
+Renest drive** uploads it once you approve that upload in your browser (free accounts get 1 active workflow slot kept for 7 days; keeping workflows permanently on the drive needs a paid subscription), or **Save on this machine only** keeps it on this disk, free, with no
 account needed. Restore it later on another
 machine and those files and dependencies come back, checked again against the same
 fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
@@ -22,13 +21,14 @@ fingerprints. Docs: https://renest.ai/docs/plugin-nest-this-run
   anything that could not be captured, and where the nest will be written → one of
   two buttons:
   - **Save to my Renest drive** → a short code to approve in your browser → live
-    progress until it is saved, checked and on your Renest drive. The drive needs a
-    subscription; if your plan has none, or the drive is full, the panel says so, links
+    progress until it is saved, checked and on your Renest drive. Free accounts include
+    1 active workflow slot kept for 7 days; beyond that, the drive needs a
+    subscription — if your free slot is full or the drive is full, the panel says so, links
     to the plans page, and offers **Save on this machine instead**.
   - **Save on this machine only** → the same pack, kept on this disk. Free, no sign-in.
     On a rented machine it is gone when the machine is, unless you copy the folder off.
-- If the Renest engine isn't installed yet, the tab shows the two commands that
-  install it. Nothing else to configure.
+- If the Renest engine isn't installed or running yet, the tab offers a one-click
+  **Set up & start Renest here** button (plus the terminal commands if you prefer). Nothing else to configure.
 
 ## Nest this run / Take back
 
@@ -112,8 +112,9 @@ a restart — a home directory there often does not.
   things go relative to the environment, not where they came from — so handing a
   nest to someone else does not hand over your folder layout or your user name.
 
-## Requirements
+## Requirements and Platforms
 
+- **Platform support**: Saving workflows and taking back model files into ComfyUI works on Windows, macOS, and Linux. Rebuilding and reproducing full GPU environments is verified on Linux + NVIDIA CUDA.
 - ComfyUI with the sidebar extension API (frontend 1.4x or newer).
 - The `renest` Python package (>= 0.1.0) running `renest serve` on the same machine.
   Any regular Python 3.11+ can host it — it does not have to be the interpreter

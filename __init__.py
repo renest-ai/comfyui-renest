@@ -35,6 +35,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -507,11 +509,125 @@ def _forward(method: str, tail: str, body: bytes | None, token: str | None,
         return None
 
 
+def _find_binary(name: str) -> str | None:
+    found = shutil.which(name)
+    if found:
+        return found
+    home = Path.home()
+    exe = f"{name}.exe" if sys.platform == "win32" else name
+    candidates = [
+        home / ".local" / "bin" / exe,
+        home / ".cargo" / "bin" / exe,
+        home / "Library" / "Application Support" / "uv" / "bin" / exe,
+        home / "AppData" / "Local" / "bin" / exe,
+        home / "AppData" / "Roaming" / "uv" / "bin" / exe,
+        home / "AppData" / "Local" / "uv" / "bin" / exe,
+    ]
+    for p in candidates:
+        if p.is_file():
+            return str(p)
+    return None
+
+
+_bootstrap_lock = asyncio.Lock()
+
+
+def _run_bootstrap_sync() -> dict:
+    """Find or install the renest engine and start renest serve.
+
+    All subcommands are constant list-form calls: no user input is taken from the request.
+    uv is installed via pip only if absent; uv is a self-contained binary with no Python
+    dependencies, so installing it into the current environment does not modify or conflict
+    with any existing packages in the ComfyUI environment.
+    """
+    renest_bin = _find_binary("renest")
+    if not renest_bin:
+        uv_bin = _find_binary("uv")
+        if not uv_bin:
+            cmd_pip = [sys.executable, "-m", "pip", "install", "uv"]
+            res = subprocess.run(cmd_pip, capture_output=True, text=True)
+            if res.returncode != 0:
+                err = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+                return {"ok": False, "error": f"Failed to install uv: {err}"}
+            uv_bin = _find_binary("uv")
+
+        uv_cmd = [uv_bin] if uv_bin else [sys.executable, "-m", "uv"]
+        cmd_install = uv_cmd + ["tool", "install", "--upgrade", "renest"]
+        res = subprocess.run(cmd_install, capture_output=True, text=True)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+            return {"ok": False, "error": f"Failed to install renest via uv: {err}"}
+        renest_bin = _find_binary("renest")
+
+    if not renest_bin:
+        return {"ok": False, "error": "renest executable not found after installation"}
+
+    # If the engine is already up and healthy, we are done
+    health = _forward("GET", "health", None, None, 1.0)
+    if health is not None and _read_token() is not None:
+        return {"ok": True, "status": "already_running"}
+
+    home = Path.home()
+    log_dir = home / ".config" / "renest"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    log_path = log_dir / "serve.log"
+
+    try:
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            if sys.platform == "win32":
+                creationflags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                subprocess.Popen(
+                    [renest_bin, "serve"],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                )
+            else:
+                subprocess.Popen(
+                    [renest_bin, "serve"],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to start renest serve: {e}"}
+
+    # Wait bounded for the engine to answer health check and write token
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        ans = _forward("GET", "health", None, None, 1.0)
+        if ans is not None and _read_token() is not None:
+            return {"ok": True, "status": "started"}
+
+    return {
+        "ok": False,
+        "error": f"renest serve started but did not respond within 30s (see {log_path})",
+    }
+
+
 def _register_routes() -> None:
     from aiohttp import web
     from server import PromptServer
 
     routes = PromptServer.instance.routes
+
+    @routes.post("/renest/bootstrap")
+    async def renest_bootstrap(request: web.Request) -> web.Response:
+        """One-click setup: install renest if needed and start renest serve.
+
+        Accepts no commands or paths from the request body. Single-flight.
+        """
+        if _bootstrap_lock.locked():
+            return web.json_response({"ok": False, "error": "Setup is already in progress"}, status=409)
+        async with _bootstrap_lock:
+            loop = asyncio.get_running_loop()
+            res = await loop.run_in_executor(None, _run_bootstrap_sync)
+            status = 200 if res.get("ok") else 500
+            return web.json_response(res, status=status)
 
     @routes.get("/renest/info")
     async def renest_info(request: web.Request) -> web.Response:

@@ -29,11 +29,17 @@ const SERVE_CMD = "renest serve";
 const LOGIN_CMD = "renest login";
 // The web console's sign-up page, for someone who has no Renest account to sign in to.
 const REGISTER_URL = "https://app.renest.ai/register";
+const PLAN_URL = "https://app.renest.ai/plan";
 // What a nest kept on this machine is, where it sits, and how to take it with you.
 const LOCAL_NEST_DOCS_URL = "https://renest.ai/docs/plugin-nest-this-run#where";
 // Refusals that mean "your drive will not take this" — a plan without cloud storage, or
 // a full drive. Packing on this machine stays free, so these offer that instead.
-const DRIVE_REFUSALS = new Set(["PLAN_CANNOT_PACK", "QUOTA_EXCEEDED"]);
+const DRIVE_REFUSALS = new Set([
+  "PLAN_CANNOT_PACK",
+  "PLAN_FREE_SLOT_FULL",
+  "FREE_TRIAL_CAPACITY_REACHED",
+  "QUOTA_EXCEEDED",
+]);
 // The engine's own class for "the drive checked the nest and said no": the packing
 // worked, so the heading must not say "Packing failed". Not a service code, so it is
 // kept apart from DRIVE_REFUSALS (which the contract test checks against the server).
@@ -170,7 +176,7 @@ function el(tag, style, text) {
 
 function copyBtn(cmd) {
   const b = el("button",
-    "margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border:1px solid #555;" +
+    "margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border:1px solid var(--border-color, #555);" +
     "border-radius:4px;background:transparent;color:inherit", "Copy");
   b.onclick = async () => {
     const ok = await copyText(cmd);
@@ -223,7 +229,7 @@ function safeHttpUrl(u) {
 }
 
 function linkOut(href, text) {
-  const a = el("a", "color:#4cc38a;text-decoration:underline;cursor:pointer", text);
+  const a = el("a", "color:var(--p-primary-color, #4cc38a);text-decoration:underline;cursor:pointer", text);
   a.href = href;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
@@ -293,7 +299,7 @@ async function startPack(out, recipe, name, destination, ctx) {
       drawSignIn(out, e.message, job);
       return false;
     }
-    out.appendChild(el("p", "color:#e5484d", `Couldn't start: ${e.message}`));
+    out.appendChild(el("p", "color:var(--error-text, #e5484d)", `Couldn't start: ${e.message}`));
     return false;
   }
 }
@@ -309,15 +315,15 @@ const S = {
   root: "padding:14px;font-size:13px;line-height:1.55;display:flex;flex-direction:column;gap:12px",
   h: "font-size:14px;font-weight:700;margin:0",
   sub: "opacity:.75;margin:0",
-  code: "display:block;font-family:monospace;font-size:12px;padding:8px 10px;border:1px solid #444;" +
-    "border-radius:6px;margin-top:6px;user-select:all;overflow-x:auto;white-space:nowrap",
+  code: "display:block;font-family:monospace;font-size:12px;padding:8px 10px;border:1px solid var(--border-color, #444);" +
+    "border-radius:6px;margin-top:6px;user-select:all;overflow-x:auto;white-space:nowrap;background:var(--comfy-input-bg, transparent)",
   pri: "padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;border:none;border-radius:6px;" +
-    "background:#2E8B6E;color:#fff",
-  sec: "padding:8px 14px;font-size:13px;cursor:pointer;border:1px solid #555;border-radius:6px;" +
+    "background:var(--p-primary-color, var(--primary-color, #2E8B6E));color:#fff",
+  sec: "padding:8px 14px;font-size:13px;cursor:pointer;border:1px solid var(--border-color, #555);border-radius:6px;" +
     "background:transparent;color:inherit",
-  box: "border:1px solid #444;border-radius:8px;padding:10px 12px",
+  box: "border:1px solid var(--border-color, #444);border-radius:8px;padding:10px 12px;background:var(--comfy-menu-bg, transparent)",
   log: "font-family:monospace;font-size:11px;max-height:180px;overflow-y:auto;white-space:pre-wrap;" +
-    "border:1px solid #333;border-radius:6px;padding:8px;opacity:.85",
+    "border:1px solid var(--border-color, #333);border-radius:6px;padding:8px;opacity:.85;background:var(--comfy-input-bg, transparent)",
 };
 
 function render() {
@@ -333,12 +339,12 @@ function render() {
 
 /** Two section headings, Save and Take back. Plain buttons: no framework in here. */
 function drawTabsInto() {
-  const bar = el("div", "display:flex;gap:4px;border-bottom:1px solid #444");
+  const bar = el("div", "display:flex;gap:4px;border-bottom:1px solid var(--border-color, #444)");
   for (const [id, label] of [["save", "Save"], ["takeback", "Take back"]]) {
     const on = activeTab === id;
     const b = el("button",
       "padding:6px 12px;font-size:13px;cursor:pointer;background:transparent;color:inherit;" +
-      "border:none;border-bottom:2px solid " + (on ? "#2E8B6E" : "transparent") +
+      "border:none;border-bottom:2px solid " + (on ? "var(--p-primary-color, #2E8B6E)" : "transparent") +
       ";font-weight:" + (on ? "700" : "400") + ";opacity:" + (on ? "1" : ".7"), label);
     b.setAttribute("aria-pressed", on ? "true" : "false");
     b.onclick = () => {
@@ -378,24 +384,62 @@ async function drawInto(root) {
     return;
   }
   if (state !== "ready") {
-    // No engine yet: show the two commands that install it, rather than a dead end.
     status.textContent = "The Renest engine isn't running on this machine yet.";
     const guide = el("div", S.box);
-    guide.appendChild(el("div", "font-weight:600", "Two steps, in any terminal:"));
-    const c1 = el("code", S.code, INSTALL_CMD);
-    c1.appendChild(copyBtn(INSTALL_CMD));
-    guide.appendChild(c1);
-    const c2 = el("code", S.code, SERVE_CMD);
-    c2.appendChild(copyBtn(SERVE_CMD));
-    guide.appendChild(c2);
-    guide.appendChild(el("p", S.sub + ";margin-top:8px",
-      // Sentence-initial: the brand form, capitalised. The bare command name at the
-      // start of a sentence reads as a typo to everyone who does not already know
-      // that the command is spelled in lower case.
+    guide.appendChild(el("div", "font-weight:600", "Start Renest with one click:"));
+    guide.appendChild(el("p", S.sub + ";margin-top:4px",
       "Renest saves the models, custom nodes, dependency locks and workflow behind a " +
       "working run, and checks every file byte for byte."));
+
+    const btnRow = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center");
+    const autoBtn = el("button", S.pri, "Set up & start Renest here");
+    const spinSpan = el("span", S.sub + ";font-size:12px", "");
+    btnRow.append(autoBtn, spinSpan);
+    guide.appendChild(btnRow);
+
+    autoBtn.onclick = async () => {
+      autoBtn.disabled = true;
+      autoBtn.textContent = "Starting engine…";
+      spinSpan.textContent = "Installing or starting renest serve in background…";
+      try {
+        const res = await api.fetchApi("/renest/bootstrap", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+        spinSpan.textContent = "Engine ready! Re-checking…";
+        setTimeout(render, 1000);
+      } catch (err) {
+        autoBtn.disabled = false;
+        autoBtn.textContent = "Try again";
+        spinSpan.style.color = "var(--error-text, #e5484d)";
+        spinSpan.textContent = `Setup failed: ${err.message}`;
+      }
+    };
+
+    const details = document.createElement("details");
+    details.style.cssText = "margin-top:12px;font-size:12px;opacity:.85";
+    const summary = document.createElement("summary");
+    summary.style.cssText = "cursor:pointer;font-weight:600;margin-bottom:6px";
+    summary.textContent = "Or run two commands in your terminal:";
+    details.appendChild(summary);
+
+    const c1 = el("code", S.code, INSTALL_CMD);
+    c1.appendChild(copyBtn(INSTALL_CMD));
+    details.appendChild(c1);
+    const c2 = el("code", S.code, SERVE_CMD);
+    c2.appendChild(copyBtn(SERVE_CMD));
+    details.appendChild(c2);
+    guide.appendChild(details);
+
+    const linkRow = el("p", S.sub + ";margin-top:12px;font-size:12px", "New to Renest? ");
+    linkRow.appendChild(linkOut(REGISTER_URL, "Create a free account"));
+    linkRow.appendChild(document.createTextNode(" · "));
+    linkRow.appendChild(linkOut("https://renest.ai", "renest.ai"));
+    guide.appendChild(linkRow);
+
     root.appendChild(guide);
-    const retry = el("button", S.sec, "Check again");
+    const retry = el("button", S.sec + ";margin-top:8px", "Check again");
     retry.onclick = render;
     root.appendChild(retry);
     return;
@@ -455,7 +499,7 @@ async function drawInto(root) {
         again: SAVE_LABEL, cleanable: true, models: (preview.items || {}).models || [],
       });
     } catch (e) {
-      out.appendChild(el("p", "color:#e5484d", `Preview failed: ${e.message}`));
+      out.appendChild(el("p", "color:var(--error-text, #e5484d)", `Preview failed: ${e.message}`));
     } finally {
       nestBtn.disabled = false;
       nestBtn.textContent = SAVE_LABEL;
@@ -470,7 +514,7 @@ function rowsWithMore(parent, rows, limit = 6) {
   if (rows.length <= limit) return;
   const more = el("button",
     "align-self:flex-start;padding:0;margin-top:2px;font-size:11px;cursor:pointer;border:none;" +
-    "background:transparent;color:#4cc38a;text-decoration:underline", `Show ${rows.length - limit} more`);
+    "background:transparent;color:var(--p-primary-color, #4cc38a);text-decoration:underline", `Show ${rows.length - limit} more`);
   more.onclick = () => {
     rows.slice(limit).forEach((r) => parent.insertBefore(r, more));
     more.remove();
@@ -515,6 +559,9 @@ function cleanableBlock(models) {
   const total = models.reduce((n, m) => n + (Number(m.size_bytes ?? m.approx_bytes) || 0), 0);
   box.appendChild(el("div", "font-size:11px;opacity:.6",
     `${models.length} file${models.length === 1 ? "" : "s"} · ${fmtBytes(total)}`));
+  box.appendChild(el("p", S.sub + ";font-size:11px;margin-top:4px",
+    "Free accounts keep 1 active workflow on the drive for 7 days; Plus keeps workflows permanently."));
+  box.appendChild(linkOut(PLAN_URL, "Keep permanently with Plus"));
   box.appendChild(el("p", S.sub + ";font-size:11px;margin-top:4px",
     "Workflows you haven't saved are not checked. Renest never deletes files here."));
   return box;
@@ -569,7 +616,7 @@ function drawPreview(out, preview, recipe, opts = {}) {
   // sends people off to rebuild from a list that looks complete but isn't.
   const warnings = preview.warnings || [];
   if (warnings.length) {
-    const warn = el("div", S.box + ";margin-top:8px;border-color:#8a6d1f");
+    const warn = el("div", S.box + ";margin-top:8px;border-color:var(--warning-border, #8a6d1f)");
     warn.appendChild(el("div", "font-weight:600;margin-bottom:4px",
       `Worth reading before you save (${warnings.length})`));
     for (const w of warnings.slice(0, 6)) {
@@ -588,16 +635,16 @@ function drawPreview(out, preview, recipe, opts = {}) {
   }
 
   out.appendChild(el("p", S.sub + ";margin-top:8px;font-size:12px",
-    "Save it to your Renest drive (needs a subscription; you approve each upload once, " +
-    "in your browser), or keep it on this machine only, free."));
+    "Save it to your Renest drive (1 free slot kept for 7 days, or keep permanently with Plus; " +
+    "you approve each upload once in your browser), or keep it on this machine only, free."));
 
   const nameInput = el("input",
     "width:100%;box-sizing:border-box;margin-top:10px;padding:8px 10px;font-size:13px;" +
-    "border:1px solid #555;border-radius:6px;background:transparent;color:inherit");
+    "border:1px solid var(--border-color, #555);border-radius:6px;background:var(--comfy-input-bg, transparent);color:inherit");
   nameInput.value = withLocalDate(preview.default_name) || "my-run";
   out.appendChild(nameInput);
   const buttons = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px");
-  const toDrive = el("button", S.pri, "Save to my Renest drive");
+  const toDrive = el("button", S.pri, "Save to my Renest drive (1 free slot · 7 days)");
   const toLocal = el("button", S.sec, "Save on this machine only");
   buttons.append(toDrive, toLocal);
   out.appendChild(buttons);
@@ -666,8 +713,8 @@ function followJob(out, jobId, ctx = {}) {
   const busyHead = local ? "Packing…" : "Saving to your Renest drive…";
   const head = el("div", "font-weight:600", busyHead);
   const stageLine = el("div", S.sub, "Waiting to start");
-  const bar = el("div", "height:6px;border-radius:3px;background:#333;overflow:hidden;margin:8px 0");
-  const fill = el("div", "height:100%;width:0%;background:#2E8B6E;transition:width .4s");
+  const bar = el("div", "height:6px;border-radius:3px;background:var(--border-color, #333);overflow:hidden;margin:8px 0");
+  const fill = el("div", "height:100%;width:0%;background:var(--p-primary-color, #2E8B6E);transition:width .4s");
   bar.appendChild(fill);
   const log = el("div", S.log, "");
   // An empty log box reads as a blank square above Cancel (founder's real run,
@@ -994,7 +1041,7 @@ function drawNestList(out, nests) {
   const box = el("div", S.box + ";display:flex;flex-direction:column");
   const rows = nests.map((n) => {
     const row = el("div", "display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;" +
-      "padding:6px 0;border-bottom:1px solid #333");
+      "padding:6px 0;border-bottom:1px solid var(--border-color, #333)");
     row.appendChild(el("span", "flex:1 1 140px;min-width:0;overflow-wrap:anywhere;font-weight:600",
       n.name || "(no name)"));
     const tag = n.ran === true ? "ran to completion" : n.ran === false ? "not run" : null;
@@ -1023,8 +1070,8 @@ async function runTakeback(out, nest, mode) {
     ? `Bringing back the files of ${nest.name || "this workflow"}…`
     : `Comparing ${nest.name || "this workflow"} with this machine…`);
   const line = el("div", S.sub, "");
-  const bar = el("div", "height:6px;border-radius:3px;background:#333;overflow:hidden;margin:4px 0");
-  const fill = el("div", "height:100%;width:0%;background:#2E8B6E;transition:width .4s");
+  const bar = el("div", "height:6px;border-radius:3px;background:var(--border-color, #333);overflow:hidden;margin:4px 0");
+  const fill = el("div", "height:100%;width:0%;background:var(--p-primary-color, #2E8B6E);transition:width .4s");
   bar.appendChild(fill);
   const log = el("div", S.log, "");
   out.append(head, line);
@@ -1157,7 +1204,7 @@ function drawReport(out, nest, result) {
       fileLines.push(withheldRow(f.path, f.origin_url));
     } else if (f.state === "refused") {
       fileLines.push(factRow("", `${f.path}: refused — ${f.why || "it would be placed where files get run as code"}`,
-        "font-size:12px;color:#e5484d"));
+        "font-size:12px;color:var(--error-text, #e5484d)"));
     } else if (f.state === "sidebar_workflow") {
       fileLines.push(factRow("", `${f.path}: the workflow — goes to your Workflows list`,
         "font-size:12px"));
@@ -1198,7 +1245,7 @@ function drawFetched(out, nest, result) {
   for (const w of o.withheld_files || []) lines.push(withheldRow(w.path, w.origin_url, null));
   for (const f of o.failed_files || []) {
     lines.push(factRow(null, `${f.path}: couldn't be fetched (${f.why || "no reason given"})`,
-      "font-size:12px;color:#e5484d"));
+      "font-size:12px;color:var(--error-text, #e5484d)"));
   }
   rowsWithMore(box, lines);
   if (lines.length) out.appendChild(box);

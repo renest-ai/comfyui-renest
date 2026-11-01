@@ -4,13 +4,16 @@
 [project]
 name = "comfyui-renest"
 description = "Official Renest panel: save a ComfyUI run that worked - models, custom nodes, exact package versions, workflow - and bring it back on another Linux GPU machine, every file checked against its SHA-256."
-version = "0.1.13"
+version = "0.1.14"
 license = { file = "LICENSE" }
 dependencies = []
-# What the Registry shows as supported. Both ends of a move are Linux + NVIDIA
-# (the README's "where it works" section); Windows and macOS are deliberately absent.
+# What the Registry shows as supported. Saving workflows and taking back model
+# files inside ComfyUI works on Windows, macOS, and Linux; full environment
+# rebuilds run on Linux + NVIDIA CUDA.
 classifiers = [
     "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
     "Environment :: GPU :: NVIDIA CUDA",
 ]
 
