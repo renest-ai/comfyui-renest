@@ -229,7 +229,7 @@ function safeHttpUrl(u) {
 }
 
 function linkOut(href, text) {
-  const a = el("a", "color:var(--p-primary-color, #4cc38a);text-decoration:underline;cursor:pointer", text);
+  const a = el("a", "color:#4cc38a;text-decoration:underline;cursor:pointer", text);
   a.href = href;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
@@ -264,7 +264,7 @@ function drawSignIn(out, message, ctx) {
   const box = el("div", S.box);
   box.appendChild(el("div", "font-weight:600", "Sign this machine in first"));
   box.appendChild(el("p", S.sub + ";margin-top:4px", message ||
-    "This machine is not signed in to Renest. In its terminal, run:"));
+    "Local saving is free and needs no account. Connecting your machine is only needed to sync to your Renest drive or share hand-off restore codes. In its terminal, run:"));
   const c = el("code", S.code, LOGIN_CMD);
   c.appendChild(copyBtn(LOGIN_CMD));
   box.appendChild(c);
@@ -318,7 +318,7 @@ const S = {
   code: "display:block;font-family:monospace;font-size:12px;padding:8px 10px;border:1px solid var(--border-color, #444);" +
     "border-radius:6px;margin-top:6px;user-select:all;overflow-x:auto;white-space:nowrap;background:var(--comfy-input-bg, transparent)",
   pri: "padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;border:none;border-radius:6px;" +
-    "background:var(--p-primary-color, var(--primary-color, #2E8B6E));color:#fff",
+    "background:#2E8B6E;color:#fff",
   sec: "padding:8px 14px;font-size:13px;cursor:pointer;border:1px solid var(--border-color, #555);border-radius:6px;" +
     "background:transparent;color:inherit",
   box: "border:1px solid var(--border-color, #444);border-radius:8px;padding:10px 12px;background:var(--comfy-menu-bg, transparent)",
@@ -344,7 +344,7 @@ function drawTabsInto() {
     const on = activeTab === id;
     const b = el("button",
       "padding:6px 12px;font-size:13px;cursor:pointer;background:transparent;color:inherit;" +
-      "border:none;border-bottom:2px solid " + (on ? "var(--p-primary-color, #2E8B6E)" : "transparent") +
+      "border:none;border-bottom:2px solid " + (on ? "#2E8B6E" : "transparent") +
       ";font-weight:" + (on ? "700" : "400") + ";opacity:" + (on ? "1" : ".7"), label);
     b.setAttribute("aria-pressed", on ? "true" : "false");
     b.onclick = () => {
@@ -453,8 +453,8 @@ async function drawInto(root) {
   }
 
   status.textContent = lastRunFlag
-    ? "That run worked — you can nest it now."
-    : "Engine ready. Run your workflow once; when it finishes, you can save it.";
+    ? "✓ Run completed — dependencies and models captured."
+    : "Engine ready. Run your workflow once to capture working dependencies and models.";
 
   // One way in (founder 2026-10-19): only a workflow that just ran to the end is saved.
   // What a nest is worth is the environment facts caught at that run, not the files alone.
@@ -482,10 +482,13 @@ async function drawInto(root) {
         return;
       }
       if (graphKey(prompt.output) !== lastGoodGraph) {
-        out.appendChild(el("p", "opacity:.75", lastGoodGraph
+        const hintBox = el("div", S.box + ";margin-top:6px");
+        hintBox.appendChild(el("div", "font-weight:600;font-size:12px", "Run this workflow once first"));
+        hintBox.appendChild(el("p", S.sub + ";margin-top:4px;font-size:11px", lastGoodGraph
           ? "This workflow has changed since its last run finished. Run it once more and let " +
             "it finish — Renest only saves a run that worked."
-          : "Run this workflow once and let it finish first — Renest only saves a run that worked."));
+          : "Click Queue Prompt to run this workflow once and let it finish first — Renest only saves a run that worked so all dependencies can be verified."));
+        out.appendChild(hintBox);
         return;
       }
       // `output` is what ComfyUI runs; `workflow` is the canvas itself, the only form
@@ -514,7 +517,7 @@ function rowsWithMore(parent, rows, limit = 6) {
   if (rows.length <= limit) return;
   const more = el("button",
     "align-self:flex-start;padding:0;margin-top:2px;font-size:11px;cursor:pointer;border:none;" +
-    "background:transparent;color:var(--p-primary-color, #4cc38a);text-decoration:underline", `Show ${rows.length - limit} more`);
+    "background:transparent;color:#4cc38a;text-decoration:underline", `Show ${rows.length - limit} more`);
   more.onclick = () => {
     rows.slice(limit).forEach((r) => parent.insertBefore(r, more));
     more.remove();
@@ -569,42 +572,85 @@ function cleanableBlock(models) {
 
 function drawPreview(out, preview, recipe, opts = {}) {
   out.replaceChildren();
-  const box = el("div", S.box);
-  box.appendChild(el("div", "font-weight:600;margin-bottom:6px", "What goes in the nest"));
+  const box = el("div", S.box + ";display:flex;flex-direction:column;gap:8px");
+
+  const headRow = el("div", "display:flex;justify-content:space-between;align-items:baseline");
+  headRow.appendChild(el("span", "font-weight:700;font-size:13px", "What goes in the nest"));
+  headRow.appendChild(el("span", "font-family:monospace;font-weight:700", fmtBytes(preview.size_estimate_bytes)));
+  box.appendChild(headRow);
+
   const items = preview.items || {};
-  // Code entries cover both ComfyUI itself (dep_role "host") and the custom nodes
-  // installed into it ("extension"). Showing them on one line counts ComfyUI as a
-  // custom node, which makes both the number and the list wrong.
   const code = items.nodes || [];
-  const rows = [
-    ["Models", items.models || []],
-    ["ComfyUI itself", code.filter((i) => i.dep_role === "host")],
-    ["Custom nodes", code.filter((i) => i.dep_role !== "host")],
-    ["Dependency locks", items.deps || []],
-  ];
-  for (const [label, list] of rows) {
-    if (!list.length) continue;
-    const line = el("div", "display:flex;justify-content:space-between;padding:2px 0");
-    line.appendChild(el("span", "opacity:.8", label));
-    line.appendChild(el("span", "font-family:monospace", String(list.length)));
-    box.appendChild(line);
-    for (const item of list.slice(0, 6)) {
-      const size = item.size_bytes ?? item.approx_bytes;
-      box.appendChild(el("div", "font-family:monospace;font-size:11px;opacity:.65;" +
-        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
-        `· ${item.name || item.path || "?"}${size ? ` (${fmtBytes(size)})` : ""}`));
-    }
-    if (list.length > 6) box.appendChild(el("div", "font-size:11px;opacity:.5", `… and ${list.length - 6} more`));
+  const models = items.models || [];
+  const hostNodes = code.filter((i) => i.dep_role === "host");
+  const customNodes = code.filter((i) => i.dep_role !== "host");
+  const deps = items.deps || [];
+
+  const summaryLine = el("div", "display:flex;justify-content:space-between;font-size:11px;opacity:.75;padding-bottom:2px");
+  summaryLine.appendChild(el("span", "", `${models.length} model${models.length === 1 ? "" : "s"} · ${customNodes.length} custom node${customNodes.length === 1 ? "" : "s"}`));
+  summaryLine.appendChild(el("span", "", "dependencies locked"));
+  box.appendChild(summaryLine);
+
+  function createFolder(title, countText, sizeText, rows, defaultOpen = false) {
+    const details = document.createElement("details");
+    if (defaultOpen) details.open = true;
+    details.style.cssText = "border:1px solid var(--border-color, #444);border-radius:6px;background:var(--comfy-input-bg, transparent);overflow:hidden";
+
+    const summary = document.createElement("summary");
+    summary.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:6px 10px;cursor:pointer;font-size:12px;user-select:none;font-weight:600";
+
+    const left = el("span", "display:flex;align-items:center;gap:6px");
+    left.appendChild(document.createTextNode(title));
+    if (countText) left.appendChild(el("span", "font-size:11px;opacity:.6;font-weight:normal", `(${countText})`));
+
+    const right = el("span", "font-family:monospace;font-size:11px;opacity:.8;font-weight:normal", sizeText || "");
+    summary.append(left, right);
+    details.appendChild(summary);
+
+    const list = el("div", "padding:4px 10px 8px 10px;display:flex;flex-direction:column;gap:3px;border-top:1px solid var(--border-color, #333)");
+    rows.forEach((r) => list.appendChild(r));
+    details.appendChild(list);
+    return details;
   }
-  const total = el("div", "display:flex;justify-content:space-between;margin-top:6px;font-weight:600");
-  total.appendChild(el("span", "", "Estimated size"));
-  total.appendChild(el("span", "font-family:monospace", fmtBytes(preview.size_estimate_bytes)));
-  box.appendChild(total);
+
+  const folders = el("div", "display:flex;flex-direction:column;gap:6px;margin-top:2px");
+  if (models.length) {
+    const modelsBytes = models.reduce((n, m) => n + (Number(m.size_bytes ?? m.approx_bytes) || 0), 0);
+    const modelRows = models.map((m) => {
+      const size = m.size_bytes ?? m.approx_bytes;
+      const row = el("div", "display:flex;justify-content:space-between;align-items:baseline;padding:2px 0;font-family:monospace;font-size:11px;opacity:.85");
+      row.append(pathNode(m.path || m.name || "?", "min-width:0;flex:1;overflow-wrap:anywhere"),
+        el("span", "flex:none;margin-left:8px", size ? fmtBytes(size) : ""));
+      return row;
+    });
+    folders.appendChild(createFolder("Models", String(models.length), fmtBytes(modelsBytes), modelRows, true));
+  }
+
+  if (customNodes.length) {
+    const nodeRows = customNodes.map((n) => {
+      const row = el("div", "display:flex;justify-content:space-between;align-items:baseline;padding:2px 0;font-size:11px;opacity:.85");
+      row.appendChild(pathNode(n.name || n.path || "?", "min-width:0;flex:1;overflow-wrap:anywhere;font-family:monospace"));
+      const tag = el("span", "flex:none;margin-left:8px;font-size:10px;opacity:.75", "locked");
+      row.appendChild(tag);
+      return row;
+    });
+    folders.appendChild(createFolder("Custom nodes", String(customNodes.length), "locked", nodeRows, false));
+  }
+
+  const depItems = [...hostNodes, ...deps];
+  if (depItems.length) {
+    const depRows = depItems.map((d) => {
+      const row = el("div", "display:flex;justify-content:space-between;align-items:baseline;padding:2px 0;font-size:11px;opacity:.85");
+      row.appendChild(el("span", "min-width:0;flex:1;overflow-wrap:anywhere;font-family:monospace", d.name || (d.dep_role === "host" ? "ComfyUI core" : "python_lock")));
+      const tag = el("span", "flex:none;margin-left:8px;font-size:10px;opacity:.7", d.dep_role === "host" ? "host" : "uv");
+      row.appendChild(tag);
+      return row;
+    });
+    folders.appendChild(createFolder("Environment & locks", String(depItems.length), "verified", depRows, false));
+  }
+  box.appendChild(folders);
+
   if (preview.out_dir) {
-    // Label and path on separate lines. Kept as one line with break-all, the path
-    // split mid-word at whatever column the panel happened to end at
-    // ("…/renest-ne" + "ts"), which reads like a typo. ``anywhere`` moves the whole
-    // path down first and only breaks it if it still does not fit.
     const where = el("div", "font-size:11px;opacity:.6;margin-top:6px", "Packed on this machine in");
     where.appendChild(el("div", "font-family:monospace;overflow-wrap:anywhere;opacity:.9",
       preview.out_dir));
@@ -612,17 +658,12 @@ function drawPreview(out, preview, recipe, opts = {}) {
   }
   out.appendChild(box);
 
-  // Say what could not be captured. A confirmation screen that only shows good news
-  // sends people off to rebuild from a list that looks complete but isn't.
   const warnings = preview.warnings || [];
   if (warnings.length) {
     const warn = el("div", S.box + ";margin-top:8px;border-color:var(--warning-border, #8a6d1f)");
     warn.appendChild(el("div", "font-weight:600;margin-bottom:4px",
       `Worth reading before you save (${warnings.length})`));
     for (const w of warnings.slice(0, 6)) {
-      // Bullet in its own column, text in a shrinkable one. As one text node the
-      // long file paths could not wrap: they ran past the right edge of the box and
-      // pushed the bullet onto a line of its own.
       const row = el("div", "display:flex;gap:6px;font-size:11px;opacity:.8;padding:2px 0");
       row.appendChild(el("span", "flex:none", "·"));
       row.appendChild(el("span", "min-width:0;overflow-wrap:anywhere", w));
@@ -644,9 +685,9 @@ function drawPreview(out, preview, recipe, opts = {}) {
   nameInput.value = withLocalDate(preview.default_name) || "my-run";
   out.appendChild(nameInput);
   const buttons = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px");
-  const toDrive = el("button", S.pri, "Save to my Renest drive (1 free slot · 7 days)");
-  const toLocal = el("button", S.sec, "Save on this machine only");
-  buttons.append(toDrive, toLocal);
+  const toLocal = el("button", S.pri, "Save on this machine only");
+  const toDrive = el("button", S.sec, "Save to my Renest drive (1 free slot · 7 days)");
+  buttons.append(toLocal, toDrive);
   out.appendChild(buttons);
 
   const ctx = { ...opts, outDir: preview.out_dir };
@@ -661,8 +702,8 @@ function drawPreview(out, preview, recipe, opts = {}) {
       btn.textContent = label;
     }
   };
-  toDrive.onclick = () => go(toDrive, "drive");
   toLocal.onclick = () => go(toLocal, "local");
+  toDrive.onclick = () => go(toDrive, "drive");
 }
 
 // Turn the engine's NDJSON log tail into plain sentences. Anything we don't
@@ -714,7 +755,7 @@ function followJob(out, jobId, ctx = {}) {
   const head = el("div", "font-weight:600", busyHead);
   const stageLine = el("div", S.sub, "Waiting to start");
   const bar = el("div", "height:6px;border-radius:3px;background:var(--border-color, #333);overflow:hidden;margin:8px 0");
-  const fill = el("div", "height:100%;width:0%;background:var(--p-primary-color, #2E8B6E);transition:width .4s");
+  const fill = el("div", "height:100%;width:0%;background:#2E8B6E;transition:width .4s");
   bar.appendChild(fill);
   const log = el("div", S.log, "");
   // An empty log box reads as a blank square above Cancel (founder's real run,
@@ -787,6 +828,19 @@ function followJob(out, jobId, ctx = {}) {
         out.insertBefore(linkOut(LOCAL_NEST_DOCS_URL, "How to keep or move a nest"), log);
         log.remove();
         toast("success", "Saved on this machine only", "Copy its folder off this machine to keep it.");
+
+        const nextSteps = el("div", S.box + ";margin-top:10px;display:flex;flex-direction:column;gap:6px");
+        nextSteps.appendChild(el("div", "font-weight:600;font-size:12px", "Want to back up or move to another machine?"));
+        nextSteps.appendChild(el("p", S.sub + ";font-size:11px;margin:0",
+          "Back up to your Renest drive (1 free slot · 7 days) to free local disk space or restore across machines."));
+        const upBtn = el("button", S.sec + ";align-self:flex-start;margin-top:4px", "Save to my Renest drive");
+        upBtn.onclick = () => {
+          upBtn.disabled = true;
+          upBtn.textContent = "Starting upload…";
+          startPack(out, ctx.recipe, ctx.name, "drive", ctx);
+        };
+        nextSteps.appendChild(upBtn);
+        out.appendChild(nextSteps);
       } else if (job.state === "succeeded" && ((job.result || {}).drive || {}).verdict === "pending") {
         // Every byte is up; the drive's own check outran the engine's wait. Not a
         // failure and not yet "verified": said plainly, with a link to watch it.
@@ -1071,7 +1125,7 @@ async function runTakeback(out, nest, mode) {
     : `Comparing ${nest.name || "this workflow"} with this machine…`);
   const line = el("div", S.sub, "");
   const bar = el("div", "height:6px;border-radius:3px;background:var(--border-color, #333);overflow:hidden;margin:4px 0");
-  const fill = el("div", "height:100%;width:0%;background:var(--p-primary-color, #2E8B6E);transition:width .4s");
+  const fill = el("div", "height:100%;width:0%;background:#2E8B6E;transition:width .4s");
   bar.appendChild(fill);
   const log = el("div", S.log, "");
   out.append(head, line);
